@@ -608,8 +608,21 @@ fn draw_switcher_overlay(f: &mut Frame, app: &App) {
 
 fn draw_settings_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let height: u16 = if app.settings_theme_open { 13 } else { 7 };
-    let area = centered_rect(50, height, f.area());
+
+    // Dynamic height based on expanded sub-menus
+    let mut content_lines: u16 = 5; // top_pad + Accounts + Theme + bottom_pad + hint
+    if app.settings_accounts_open {
+        content_lines += 1 + app.accounts.len() as u16; // Add Account + each account
+        if app.settings_account_action_open {
+            content_lines += 2; // Reconnect + Remove
+        }
+    }
+    if app.settings_theme_open {
+        content_lines += builtin_themes().len() as u16;
+    }
+    let height = content_lines + 2; // +2 for borders
+
+    let area = centered_rect(60, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -625,24 +638,103 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     // Top padding
     lines.push(Line::from(""));
 
-    // Add Account item
-    let sel0 = !app.settings_theme_open && app.settings_selected == 0;
-    let prefix0 = if sel0 { "  > " } else { "    " };
-    let style0 = if sel0 {
-        Style::default()
-            .fg(theme.text)
-            .bg(theme.highlight_bg)
-            .add_modifier(Modifier::BOLD)
+    // --- Accounts item ---
+    let at_top = !app.settings_accounts_open && !app.settings_theme_open;
+    let sel0 = at_top && app.settings_selected == 0;
+    let acct_count = app.accounts.len();
+    let (prefix0, style0) = if sel0 {
+        (
+            "  > ",
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if app.settings_accounts_open {
+        (
+            "  \u{25b8} ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        Style::default().fg(theme.text_dim)
+        ("    ", Style::default().fg(theme.text_dim))
     };
     lines.push(Line::from(Span::styled(
-        format!("{}Add Account", prefix0),
+        format!("{}Accounts ({})", prefix0, acct_count),
         style0,
     )));
 
-    // Theme item
-    let sel1 = !app.settings_theme_open && app.settings_selected == 1;
+    // --- Accounts sub-menu ---
+    if app.settings_accounts_open {
+        // Add Account button
+        let is_add_sel =
+            !app.settings_account_action_open && app.settings_accounts_selected == 0;
+        let add_prefix = if is_add_sel { "      > " } else { "        " };
+        let add_style = if is_add_sel {
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_dim)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}Add Account", add_prefix),
+            add_style,
+        )));
+
+        // Active accounts
+        for (i, acct) in app.accounts.iter().enumerate() {
+            let acct_sel_idx = i + 1;
+            let is_sel = !app.settings_account_action_open
+                && app.settings_accounts_selected == acct_sel_idx;
+            let is_action_target = app.settings_account_action_open
+                && app.settings_accounts_selected == acct_sel_idx;
+            let dot = if acct.syncing { "\u{25cf}" } else { "\u{25cb}" };
+            let prefix = if is_sel { "      > " } else { "        " };
+            let style = if is_sel || is_action_target {
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_dim)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{} {}", prefix, dot, acct.user_id),
+                style,
+            )));
+
+            // Action menu for this account
+            if is_action_target {
+                let actions = ["Reconnect", "Remove Account"];
+                for (j, action) in actions.iter().enumerate() {
+                    let is_action_sel = app.settings_account_action_selected == j;
+                    let action_prefix = if is_action_sel {
+                        "          > "
+                    } else {
+                        "            "
+                    };
+                    let action_style = if is_action_sel {
+                        Style::default()
+                            .fg(if j == 1 { theme.status_err } else { theme.text })
+                            .bg(theme.highlight_bg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(if j == 1 { theme.status_err } else { theme.text_dim })
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{}", action_prefix, action),
+                        action_style,
+                    )));
+                }
+            }
+        }
+    }
+
+    // --- Theme item ---
+    let sel1 = at_top && app.settings_selected == 1;
     let (prefix1, style1) = if sel1 {
         (
             "  > ",
@@ -666,7 +758,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
         style1,
     )));
 
-    // Theme sub-list when expanded
+    // --- Theme sub-list ---
     if app.settings_theme_open {
         let themes = builtin_themes();
         for (i, t) in themes.iter().enumerate() {
@@ -695,7 +787,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
 
     // Hint
-    let hint_text = if app.settings_theme_open {
+    let hint_text = if app.settings_account_action_open || app.settings_theme_open {
         "  \u{2191}/\u{2193} select   Enter apply   Esc back"
     } else {
         "  \u{2191}/\u{2193} select   Enter open   Esc back"

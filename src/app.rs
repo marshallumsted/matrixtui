@@ -75,7 +75,11 @@ pub struct App {
     pub switcher_selected: usize,
 
     // Settings overlay state
-    pub settings_selected: usize,
+    pub settings_selected: usize,          // 0=Accounts, 1=Theme
+    pub settings_accounts_open: bool,
+    pub settings_accounts_selected: usize, // 0=Add Account, 1..=N for accounts
+    pub settings_account_action_open: bool,
+    pub settings_account_action_selected: usize, // 0=Reconnect, 1=Remove
     pub settings_theme_open: bool,
     pub settings_theme_selected: usize,
 
@@ -122,6 +126,10 @@ impl App {
             switcher_query: String::new(),
             switcher_selected: 0,
             settings_selected: 0,
+            settings_accounts_open: false,
+            settings_accounts_selected: 0,
+            settings_account_action_open: false,
+            settings_account_action_selected: 0,
             settings_theme_open: false,
             settings_theme_selected: 0,
             theme,
@@ -211,7 +219,7 @@ impl App {
                 }
             }
             Overlay::RoomSwitcher => self.handle_switcher_key(key).await,
-            Overlay::Settings => self.handle_settings_key(key),
+            Overlay::Settings => self.handle_settings_key(key).await,
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
@@ -235,6 +243,8 @@ impl App {
             KeyCode::Char('s') => {
                 self.overlay = Overlay::Settings;
                 self.settings_selected = 0;
+                self.settings_accounts_open = false;
+                self.settings_account_action_open = false;
                 self.settings_theme_open = false;
             }
             KeyCode::Up => {
@@ -284,6 +294,8 @@ impl App {
             KeyCode::Char('s') => {
                 self.overlay = Overlay::Settings;
                 self.settings_selected = 0;
+                self.settings_accounts_open = false;
+                self.settings_account_action_open = false;
                 self.settings_theme_open = false;
             }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
@@ -435,24 +447,44 @@ impl App {
         }
     }
 
-    fn handle_settings_key(&mut self, key: KeyEvent) {
+    async fn handle_settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                if self.settings_theme_open {
+                if self.settings_account_action_open {
+                    self.settings_account_action_open = false;
+                } else if self.settings_accounts_open {
+                    self.settings_accounts_open = false;
+                } else if self.settings_theme_open {
                     self.settings_theme_open = false;
                 } else {
                     self.overlay = Overlay::None;
                 }
             }
             KeyCode::Up => {
-                if self.settings_theme_open {
-                    self.settings_theme_selected = self.settings_theme_selected.saturating_sub(1);
+                if self.settings_account_action_open {
+                    self.settings_account_action_selected =
+                        self.settings_account_action_selected.saturating_sub(1);
+                } else if self.settings_accounts_open {
+                    self.settings_accounts_selected =
+                        self.settings_accounts_selected.saturating_sub(1);
+                } else if self.settings_theme_open {
+                    self.settings_theme_selected =
+                        self.settings_theme_selected.saturating_sub(1);
                 } else {
                     self.settings_selected = self.settings_selected.saturating_sub(1);
                 }
             }
             KeyCode::Down => {
-                if self.settings_theme_open {
+                if self.settings_account_action_open {
+                    if self.settings_account_action_selected < 1 {
+                        self.settings_account_action_selected += 1;
+                    }
+                } else if self.settings_accounts_open {
+                    let count = 1 + self.accounts.len(); // Add Account + each account
+                    if self.settings_accounts_selected + 1 < count {
+                        self.settings_accounts_selected += 1;
+                    }
+                } else if self.settings_theme_open {
                     let count = ui::builtin_themes().len();
                     if self.settings_theme_selected + 1 < count {
                         self.settings_theme_selected += 1;
@@ -462,8 +494,41 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if self.settings_theme_open {
-                    // Apply selected theme
+                if self.settings_account_action_open {
+                    let acct_idx = self.settings_accounts_selected - 1;
+                    match self.settings_account_action_selected {
+                        0 => {
+                            // Reconnect
+                            self.reconnect_account(acct_idx).await;
+                            self.settings_account_action_open = false;
+                        }
+                        1 => {
+                            // Remove
+                            self.remove_account_by_index(acct_idx).await;
+                            self.settings_account_action_open = false;
+                            // Clamp selection
+                            let count = 1 + self.accounts.len();
+                            if self.settings_accounts_selected >= count {
+                                self.settings_accounts_selected = count.saturating_sub(1);
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if self.settings_accounts_open {
+                    if self.settings_accounts_selected == 0 {
+                        // Add Account
+                        self.overlay = Overlay::Login;
+                        self.login_homeserver = "matrix.org".to_string();
+                        self.login_username.clear();
+                        self.login_password.clear();
+                        self.login_focus = 0;
+                        self.login_error = None;
+                    } else {
+                        // Open action menu for selected account
+                        self.settings_account_action_open = true;
+                        self.settings_account_action_selected = 0;
+                    }
+                } else if self.settings_theme_open {
                     let themes = ui::builtin_themes();
                     if let Some(t) = themes.get(self.settings_theme_selected) {
                         self.theme = t.clone();
@@ -472,16 +537,14 @@ impl App {
                     }
                     self.settings_theme_open = false;
                 } else if self.settings_selected == 0 {
-                    // Add Account — open existing login overlay
-                    self.overlay = Overlay::Login;
-                    self.login_homeserver = "matrix.org".to_string();
-                    self.login_username.clear();
-                    self.login_password.clear();
-                    self.login_focus = 0;
-                    self.login_error = None;
+                    // Open accounts sub-menu
+                    self.settings_accounts_open = true;
+                    self.settings_theme_open = false;
+                    self.settings_accounts_selected = 0;
                 } else if self.settings_selected == 1 {
-                    // Expand theme picker
+                    // Open theme picker
                     self.settings_theme_open = true;
+                    self.settings_accounts_open = false;
                     let themes = ui::builtin_themes();
                     self.settings_theme_selected = themes
                         .iter()
@@ -490,6 +553,64 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    async fn reconnect_account(&mut self, idx: usize) {
+        if idx >= self.accounts.len() {
+            return;
+        }
+        let user_id = self.accounts[idx].user_id.clone();
+        self.status_msg = format!("Reconnecting {}...", user_id);
+
+        // Remove the old account (drops client, stops sync)
+        self.accounts.remove(idx);
+
+        // Re-restore from saved config
+        if let Some(saved) = self.config.accounts.iter().find(|a| a.user_id == user_id) {
+            let saved = saved.clone();
+            match Account::restore(&saved).await {
+                Ok(mut account) => {
+                    account.start_sync(self.matrix_tx.clone());
+                    self.status_msg = format!("Reconnected {}", account.user_id);
+                    self.accounts.push(account);
+                }
+                Err(e) => {
+                    self.status_msg = format!("Reconnect failed: {}", user_id);
+                    error!("Reconnect failed for {}: {}", user_id, e);
+                }
+            }
+        }
+        self.refresh_rooms().await;
+    }
+
+    async fn remove_account_by_index(&mut self, idx: usize) {
+        if idx >= self.accounts.len() {
+            return;
+        }
+        let user_id = self.accounts[idx].user_id.clone();
+
+        // Remove from active accounts (drops client, stops sync)
+        self.accounts.remove(idx);
+
+        // Remove from config
+        self.config.remove_account(&user_id);
+        if let Err(e) = self.config.save() {
+            error!("Failed to save config: {}", e);
+        }
+
+        // Clear active room if it belonged to this account
+        if self.active_account_id.as_deref() == Some(&user_id) {
+            self.active_room = None;
+            self.active_account_id = None;
+            self.messages.clear();
+        }
+
+        self.status_msg = format!("Removed {}", user_id);
+        self.refresh_rooms().await;
+
+        if self.accounts.is_empty() {
+            self.status_msg = "No accounts \u{2014} press 's' to add one".to_string();
         }
     }
 
