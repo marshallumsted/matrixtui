@@ -3,7 +3,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, Focus, Overlay};
+use crate::app::{App, Focus, Overlay, RoomSortMode};
 
 // --- Theme system ---
 
@@ -242,56 +242,78 @@ fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let items: Vec<ListItem> = app
-        .all_rooms
-        .iter()
-        .enumerate()
-        .map(|(i, room)| {
-            let prefix = if room.is_dm { "@" } else { "#" };
-            let unread = if room.unread > 0 {
-                format!(" ({})", room.unread)
-            } else {
-                String::new()
-            };
-
-            let is_active = Some(&room.id) == app.active_room.as_ref();
-            let is_selected = i == app.selected_room;
-
-            let style = if is_active {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_selected && focused {
-                Style::default().fg(theme.text).bg(theme.highlight_bg)
-            } else if room.unread > 0 {
-                Style::default()
-                    .fg(theme.text)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.text_dim)
-            };
-
-            // Truncate name to fit
-            let max_name = (area.width as usize).saturating_sub(6);
-            let name = if room.name.len() > max_name {
-                format!("{}…", &room.name[..max_name.saturating_sub(1)])
-            } else {
-                room.name.clone()
-            };
-
-            ListItem::new(format!(" {}{}{}", prefix, name, unread)).style(style)
-        })
-        .collect();
-
-    if items.is_empty() {
+    if app.all_rooms.is_empty() {
         let empty = Paragraph::new(" No rooms yet\n\n Press 'a' to\n add an account")
             .style(Style::default().fg(theme.dimmed))
             .block(block);
         f.render_widget(empty, area);
-    } else {
-        let list = List::new(items).block(block);
-        f.render_widget(list, area);
+        return;
     }
+
+    let has_separator = app.favorites_count > 0
+        && app.favorites_count < app.all_rooms.len();
+
+    let mut items: Vec<ListItem> = Vec::new();
+    // Track mapping from visual index -> all_rooms index
+    // The separator is visual-only and not in all_rooms
+    let mut visual_to_room: Vec<Option<usize>> = Vec::new();
+
+    for (i, room) in app.all_rooms.iter().enumerate() {
+        // Insert separator between favorites and others
+        if has_separator && i == app.favorites_count {
+            let sep_width = (area.width as usize).saturating_sub(2);
+            items.push(
+                ListItem::new(format!(" {}", "\u{2500}".repeat(sep_width.saturating_sub(1))))
+                    .style(Style::default().fg(theme.dimmed)),
+            );
+            visual_to_room.push(None);
+        }
+
+        let is_fav = i < app.favorites_count;
+        let prefix = if is_fav {
+            "\u{2605}"
+        } else if room.is_dm {
+            "@"
+        } else {
+            "#"
+        };
+        let unread = if room.unread > 0 {
+            format!(" ({})", room.unread)
+        } else {
+            String::new()
+        };
+
+        let is_active = Some(&room.id) == app.active_room.as_ref();
+        let is_selected = i == app.selected_room;
+
+        let style = if is_active {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if is_selected && focused {
+            Style::default().fg(theme.text).bg(theme.highlight_bg)
+        } else if room.unread > 0 {
+            Style::default()
+                .fg(theme.text)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_dim)
+        };
+
+        // Truncate name to fit
+        let max_name = (area.width as usize).saturating_sub(6);
+        let name = if room.name.len() > max_name {
+            format!("{}…", &room.name[..max_name.saturating_sub(1)])
+        } else {
+            room.name.clone()
+        };
+
+        items.push(ListItem::new(format!(" {}{}{}", prefix, name, unread)).style(style));
+        visual_to_room.push(Some(i));
+    }
+
+    let list = List::new(items).block(block);
+    f.render_widget(list, area);
 }
 
 fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -508,7 +530,7 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
 }
 
 fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
-    let area = centered_rect(60, 22, f.area());
+    let area = centered_rect(60, 24, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -531,11 +553,13 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         "    s                Settings / themes",
         "    ?                Toggle this help",
         "",
+        "  Rooms:",
+        "    f                Toggle favorite",
+        "    Shift+Up/Down    Reorder favorites",
+        "",
         "  Chat:",
         "    Enter            Start typing",
         "    Up/Down          Scroll messages",
-        "",
-        "  Press ? or Esc to close",
     ];
 
     let text: Vec<Line> = help_text.iter().map(|&s| Line::from(s)).collect();
@@ -610,7 +634,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
 
     // Dynamic height based on expanded sub-menus
-    let mut content_lines: u16 = 5; // top_pad + Accounts + Theme + bottom_pad + hint
+    let mut content_lines: u16 = 6; // top_pad + Accounts + Theme + Sort + bottom_pad + hint
     if app.settings_accounts_open {
         content_lines += 1 + app.accounts.len() as u16; // Add Account + each account
         if app.settings_account_action_open {
@@ -619,6 +643,9 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     }
     if app.settings_theme_open {
         content_lines += builtin_themes().len() as u16;
+    }
+    if app.settings_sort_open {
+        content_lines += RoomSortMode::ALL.len() as u16;
     }
     let height = content_lines + 2; // +2 for borders
 
@@ -639,7 +666,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
 
     // --- Accounts item ---
-    let at_top = !app.settings_accounts_open && !app.settings_theme_open;
+    let at_top = !app.settings_accounts_open && !app.settings_theme_open && !app.settings_sort_open;
     let sel0 = at_top && app.settings_selected == 0;
     let acct_count = app.accounts.len();
     let (prefix0, style0) = if sel0 {
@@ -783,11 +810,60 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
         }
     }
 
+    // --- Sort item ---
+    let sel2 = at_top && app.settings_selected == 2;
+    let (prefix2, style2) = if sel2 {
+        (
+            "  > ",
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if app.settings_sort_open {
+        (
+            "  \u{25b8} ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("    ", Style::default().fg(theme.text_dim))
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{}Sort: {}", prefix2, app.room_sort.label()),
+        style2,
+    )));
+
+    // --- Sort sub-list ---
+    if app.settings_sort_open {
+        for (i, mode) in RoomSortMode::ALL.iter().enumerate() {
+            let is_active = *mode == app.room_sort;
+            let is_sel = i == app.settings_sort_selected;
+            let prefix = if is_sel { "      > " } else { "        " };
+            let suffix = if is_active { " \u{2713}" } else { "" };
+            let style = if is_sel {
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_active {
+                Style::default().fg(theme.accent)
+            } else {
+                Style::default().fg(theme.text_dim)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}{}", prefix, mode.label(), suffix),
+                style,
+            )));
+        }
+    }
+
     // Bottom padding
     lines.push(Line::from(""));
 
     // Hint
-    let hint_text = if app.settings_account_action_open || app.settings_theme_open {
+    let hint_text = if app.settings_account_action_open || app.settings_theme_open || app.settings_sort_open {
         "  \u{2191}/\u{2193} select   Enter apply   Esc back"
     } else {
         "  \u{2191}/\u{2193} select   Enter open   Esc back"

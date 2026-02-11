@@ -25,12 +25,20 @@ pub struct SavedAccount {
     pub device_id: String,
 }
 
+fn default_room_sort() -> String {
+    "unread".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub accounts: Vec<SavedAccount>,
     #[serde(default)]
     pub theme: String,
+    #[serde(default)]
+    pub favorites: Vec<String>,
+    #[serde(default = "default_room_sort")]
+    pub room_sort: String,
 }
 
 impl Config {

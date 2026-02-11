@@ -11,6 +11,46 @@ use crate::config::Config;
 use crate::event::{AppEvent, spawn_input_reader, spawn_matrix_bridge};
 use crate::ui;
 
+/// How rooms (outside favorites) are sorted
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RoomSortMode {
+    Unread,
+    Recent,
+    Alpha,
+}
+
+impl RoomSortMode {
+    pub const ALL: [RoomSortMode; 3] = [
+        RoomSortMode::Unread,
+        RoomSortMode::Recent,
+        RoomSortMode::Alpha,
+    ];
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "recent" => Self::Recent,
+            "alpha" => Self::Alpha,
+            _ => Self::Unread,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unread => "unread",
+            Self::Recent => "recent",
+            Self::Alpha => "alpha",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unread => "Unread First",
+            Self::Recent => "Recent Activity",
+            Self::Alpha => "Alphabetical",
+        }
+    }
+}
+
 /// Which panel has focus
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
@@ -83,6 +123,12 @@ pub struct App {
     pub settings_theme_open: bool,
     pub settings_theme_selected: usize,
 
+    // Sort & favorites
+    pub room_sort: RoomSortMode,
+    pub favorites_count: usize,
+    pub settings_sort_open: bool,
+    pub settings_sort_selected: usize,
+
     // Active theme
     pub theme: ui::Theme,
 
@@ -101,6 +147,7 @@ impl App {
     pub fn new(config: Config) -> Self {
         let (matrix_tx, matrix_rx) = mpsc::unbounded_channel();
         let theme = ui::theme_by_name(&config.theme);
+        let room_sort = RoomSortMode::from_str(&config.room_sort);
         Self {
             config,
             accounts: Vec::new(),
@@ -132,6 +179,10 @@ impl App {
             settings_account_action_selected: 0,
             settings_theme_open: false,
             settings_theme_selected: 0,
+            room_sort,
+            favorites_count: 0,
+            settings_sort_open: false,
+            settings_sort_selected: 0,
             theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
@@ -246,6 +297,7 @@ impl App {
                 self.settings_accounts_open = false;
                 self.settings_account_action_open = false;
                 self.settings_theme_open = false;
+                self.settings_sort_open = false;
             }
             KeyCode::Up => {
                 if self.selected_account > 0 {
@@ -265,25 +317,34 @@ impl App {
     }
 
     async fn handle_rooms_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Up => {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::SHIFT, KeyCode::Up) => {
+                self.reorder_favorite_up().await;
+            }
+            (KeyModifiers::SHIFT, KeyCode::Down) => {
+                self.reorder_favorite_down().await;
+            }
+            (_, KeyCode::Up) => {
                 if self.selected_room > 0 {
                     self.selected_room -= 1;
                 }
             }
-            KeyCode::Down => {
+            (_, KeyCode::Down) => {
                 if self.selected_room + 1 < self.all_rooms.len() {
                     self.selected_room += 1;
                 }
             }
-            KeyCode::Enter => {
+            (_, KeyCode::Enter) => {
                 self.open_selected_room().await;
             }
-            KeyCode::Tab => self.focus = Focus::Chat,
-            KeyCode::BackTab => self.focus = Focus::Accounts,
-            KeyCode::Left => self.focus = Focus::Accounts,
-            KeyCode::Right => self.focus = Focus::Chat,
-            KeyCode::Char('a') => {
+            (_, KeyCode::Tab) => self.focus = Focus::Chat,
+            (_, KeyCode::BackTab) => self.focus = Focus::Accounts,
+            (_, KeyCode::Left) => self.focus = Focus::Accounts,
+            (_, KeyCode::Right) => self.focus = Focus::Chat,
+            (_, KeyCode::Char('f')) => {
+                self.toggle_favorite().await;
+            }
+            (_, KeyCode::Char('a')) => {
                 self.overlay = Overlay::Login;
                 self.login_homeserver = "matrix.org".to_string();
                 self.login_username.clear();
@@ -291,16 +352,54 @@ impl App {
                 self.login_focus = 0;
                 self.login_error = None;
             }
-            KeyCode::Char('s') => {
+            (_, KeyCode::Char('s')) => {
                 self.overlay = Overlay::Settings;
                 self.settings_selected = 0;
                 self.settings_accounts_open = false;
                 self.settings_account_action_open = false;
                 self.settings_theme_open = false;
+                self.settings_sort_open = false;
             }
-            KeyCode::Char('?') => self.overlay = Overlay::Help,
+            (_, KeyCode::Char('?')) => self.overlay = Overlay::Help,
             _ => {}
         }
+    }
+
+    async fn toggle_favorite(&mut self) {
+        let room_id = match self.all_rooms.get(self.selected_room) {
+            Some(r) => r.id.to_string(),
+            None => return,
+        };
+        if let Some(pos) = self.config.favorites.iter().position(|f| f == &room_id) {
+            self.config.favorites.remove(pos);
+        } else {
+            self.config.favorites.push(room_id);
+        }
+        let _ = self.config.save();
+        self.refresh_rooms().await;
+    }
+
+    async fn reorder_favorite_up(&mut self) {
+        if self.selected_room == 0 || self.selected_room >= self.favorites_count {
+            return;
+        }
+        // Swap in config.favorites
+        let idx = self.selected_room;
+        self.config.favorites.swap(idx, idx - 1);
+        let _ = self.config.save();
+        self.selected_room -= 1;
+        self.refresh_rooms().await;
+    }
+
+    async fn reorder_favorite_down(&mut self) {
+        if self.selected_room + 1 >= self.favorites_count {
+            return;
+        }
+        let idx = self.selected_room;
+        self.config.favorites.swap(idx, idx + 1);
+        let _ = self.config.save();
+        self.selected_room += 1;
+        self.refresh_rooms().await;
     }
 
     fn handle_chat_key(&mut self, key: KeyEvent) {
@@ -456,6 +555,8 @@ impl App {
                     self.settings_accounts_open = false;
                 } else if self.settings_theme_open {
                     self.settings_theme_open = false;
+                } else if self.settings_sort_open {
+                    self.settings_sort_open = false;
                 } else {
                     self.overlay = Overlay::None;
                 }
@@ -470,6 +571,9 @@ impl App {
                 } else if self.settings_theme_open {
                     self.settings_theme_selected =
                         self.settings_theme_selected.saturating_sub(1);
+                } else if self.settings_sort_open {
+                    self.settings_sort_selected =
+                        self.settings_sort_selected.saturating_sub(1);
                 } else {
                     self.settings_selected = self.settings_selected.saturating_sub(1);
                 }
@@ -489,7 +593,11 @@ impl App {
                     if self.settings_theme_selected + 1 < count {
                         self.settings_theme_selected += 1;
                     }
-                } else if self.settings_selected < 1 {
+                } else if self.settings_sort_open {
+                    if self.settings_sort_selected + 1 < RoomSortMode::ALL.len() {
+                        self.settings_sort_selected += 1;
+                    }
+                } else if self.settings_selected < 2 {
                     self.settings_selected += 1;
                 }
             }
@@ -536,19 +644,38 @@ impl App {
                         let _ = self.config.save();
                     }
                     self.settings_theme_open = false;
+                } else if self.settings_sort_open {
+                    if let Some(&mode) = RoomSortMode::ALL.get(self.settings_sort_selected) {
+                        self.room_sort = mode;
+                        self.config.room_sort = mode.as_str().to_string();
+                        let _ = self.config.save();
+                        self.refresh_rooms().await;
+                    }
+                    self.settings_sort_open = false;
                 } else if self.settings_selected == 0 {
                     // Open accounts sub-menu
                     self.settings_accounts_open = true;
                     self.settings_theme_open = false;
+                    self.settings_sort_open = false;
                     self.settings_accounts_selected = 0;
                 } else if self.settings_selected == 1 {
                     // Open theme picker
                     self.settings_theme_open = true;
                     self.settings_accounts_open = false;
+                    self.settings_sort_open = false;
                     let themes = ui::builtin_themes();
                     self.settings_theme_selected = themes
                         .iter()
                         .position(|t| t.name == self.theme.name)
+                        .unwrap_or(0);
+                } else if self.settings_selected == 2 {
+                    // Open sort picker
+                    self.settings_sort_open = true;
+                    self.settings_accounts_open = false;
+                    self.settings_theme_open = false;
+                    self.settings_sort_selected = RoomSortMode::ALL
+                        .iter()
+                        .position(|m| m == &self.room_sort)
                         .unwrap_or(0);
                 }
             }
@@ -774,16 +901,72 @@ impl App {
     }
 
     pub async fn refresh_rooms(&mut self) {
-        self.all_rooms.clear();
+        // Remember current selection by room ID
+        let prev_id = self.all_rooms.get(self.selected_room).map(|r| r.id.clone());
+
+        let mut all: Vec<RoomInfo> = Vec::new();
         for account in &self.accounts {
-            self.all_rooms.extend(account.rooms().await);
+            all.extend(account.rooms().await);
         }
-        // Sort: rooms with unread first, then alphabetical
-        self.all_rooms.sort_by(|a, b| {
-            b.unread
-                .cmp(&a.unread)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
+
+        // Partition into favorites (ordered by config) and others
+        let mut favorites: Vec<RoomInfo> = Vec::new();
+        for fav_id in &self.config.favorites {
+            if let Some(pos) = all.iter().position(|r| r.id.as_str() == fav_id) {
+                favorites.push(all.remove(pos));
+            }
+        }
+
+        // Sort the remaining rooms
+        self.sort_rooms(&mut all);
+
+        self.favorites_count = favorites.len();
+        self.all_rooms = favorites;
+        self.all_rooms.append(&mut all);
+
+        // Restore selection by room ID
+        if let Some(prev) = prev_id {
+            if let Some(idx) = self.all_rooms.iter().position(|r| r.id == prev) {
+                self.selected_room = idx;
+            }
+        }
+        // Clamp
+        if self.selected_room >= self.all_rooms.len() && !self.all_rooms.is_empty() {
+            self.selected_room = self.all_rooms.len() - 1;
+        }
+    }
+
+    fn sort_rooms(&self, rooms: &mut Vec<RoomInfo>) {
+        match self.room_sort {
+            RoomSortMode::Unread => {
+                rooms.sort_by(|a, b| {
+                    b.unread
+                        .cmp(&a.unread)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+            }
+            RoomSortMode::Recent => {
+                rooms.sort_by(|a, b| {
+                    let ts_a = self
+                        .room_messages
+                        .get(&a.id)
+                        .and_then(|msgs| msgs.last())
+                        .map(|m| m.timestamp)
+                        .unwrap_or(0);
+                    let ts_b = self
+                        .room_messages
+                        .get(&b.id)
+                        .and_then(|msgs| msgs.last())
+                        .map(|m| m.timestamp)
+                        .unwrap_or(0);
+                    ts_b.cmp(&ts_a)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+            }
+            RoomSortMode::Alpha => {
+                rooms.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            }
+        }
     }
 
     async fn open_selected_room(&mut self) {
