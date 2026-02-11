@@ -163,6 +163,7 @@ pub struct App {
     pub editor_error: Option<String>,
     pub editor_busy: bool,
     pub editor_confirm_leave: bool,
+    pub editor_confirm_delete: bool,
     pub editor_room_id: Option<OwnedRoomId>,
     pub editor_account_id: Option<String>,
 
@@ -246,6 +247,7 @@ impl App {
             editor_error: None,
             editor_busy: false,
             editor_confirm_leave: false,
+            editor_confirm_delete: false,
             editor_room_id: None,
             editor_account_id: None,
             theme,
@@ -646,6 +648,7 @@ impl App {
             self.editor_error = None;
             self.editor_busy = false;
             self.editor_confirm_leave = false;
+            self.editor_confirm_delete = false;
             self.editor_room_id = Some(room_id);
             self.editor_account_id = Some(account_id);
         }
@@ -655,14 +658,17 @@ impl App {
         if self.editor_busy {
             return;
         }
+        // Focus: 0=name, 1=topic, 2=invite, 3=leave, 4=delete
         match key.code {
             KeyCode::Tab => {
-                self.editor_focus = (self.editor_focus + 1) % 4;
+                self.editor_focus = (self.editor_focus + 1) % 5;
                 self.editor_confirm_leave = false;
+                self.editor_confirm_delete = false;
             }
             KeyCode::BackTab => {
-                self.editor_focus = if self.editor_focus == 0 { 3 } else { self.editor_focus - 1 };
+                self.editor_focus = if self.editor_focus == 0 { 4 } else { self.editor_focus - 1 };
                 self.editor_confirm_leave = false;
+                self.editor_confirm_delete = false;
             }
             KeyCode::Enter => {
                 match self.editor_focus {
@@ -676,18 +682,27 @@ impl App {
                             self.editor_confirm_leave = true;
                         }
                     }
+                    4 => {
+                        if self.editor_confirm_delete {
+                            self.do_delete_room().await;
+                        } else {
+                            self.editor_confirm_delete = true;
+                        }
+                    }
                     _ => {}
                 }
             }
             KeyCode::Esc => {
-                if self.editor_confirm_leave {
+                if self.editor_confirm_leave || self.editor_confirm_delete {
                     self.editor_confirm_leave = false;
+                    self.editor_confirm_delete = false;
                 } else {
                     self.overlay = Overlay::None;
                 }
             }
             KeyCode::Char(c) => {
                 self.editor_confirm_leave = false;
+                self.editor_confirm_delete = false;
                 match self.editor_focus {
                     0 => self.editor_name.push(c),
                     1 => self.editor_topic.push(c),
@@ -697,6 +712,7 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.editor_confirm_leave = false;
+                self.editor_confirm_delete = false;
                 match self.editor_focus {
                     0 => { self.editor_name.pop(); }
                     1 => { self.editor_topic.pop(); }
@@ -784,6 +800,30 @@ impl App {
                     self.active_room = None;
                     self.active_account_id = None;
                     self.messages.clear();
+                    self.overlay = Overlay::None;
+                    self.refresh_rooms().await;
+                }
+                Err(e) => self.editor_error = Some(e.to_string()),
+            }
+        }
+        self.editor_busy = false;
+    }
+
+    async fn do_delete_room(&mut self) {
+        let (room_id, account_id) = match (&self.editor_room_id, &self.editor_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+        self.editor_busy = true;
+        self.editor_error = None;
+        if let Some(acct) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match acct.forget_room(&room_id).await {
+                Ok(()) => {
+                    self.status_msg = "Room deleted".to_string();
+                    self.active_room = None;
+                    self.active_account_id = None;
+                    self.messages.clear();
+                    self.room_messages.remove(&room_id);
                     self.overlay = Overlay::None;
                     self.refresh_rooms().await;
                 }

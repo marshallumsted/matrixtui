@@ -1148,7 +1148,7 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
 
 fn draw_editor_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 17, f.area());
+    let area = centered_rect(50, 19, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1175,6 +1175,8 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
             Constraint::Length(1), // invite field
             Constraint::Length(1), // spacer
             Constraint::Length(1), // leave button
+            Constraint::Length(1), // delete button
+            Constraint::Length(1), // spacer
             Constraint::Length(1), // error/hint
         ])
         .split(inner);
@@ -1244,6 +1246,28 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
     };
     f.render_widget(Paragraph::new(leave_text).style(leave_style), fields[11]);
 
+    // Delete button
+    let delete_style = if app.editor_focus == 4 {
+        if app.editor_confirm_delete {
+            Style::default()
+                .fg(theme.status_err)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.status_err)
+                .bg(theme.highlight_bg)
+        }
+    } else {
+        Style::default().fg(theme.status_err)
+    };
+    let delete_text = if app.editor_confirm_delete {
+        "  [ Press Enter again to DELETE ]"
+    } else {
+        "  [ Delete Room ]"
+    };
+    f.render_widget(Paragraph::new(delete_text).style(delete_style), fields[12]);
+
     let hint = if let Some(err) = &app.editor_error {
         Paragraph::new(format!("  {}", err)).style(Style::default().fg(theme.status_err))
     } else if app.editor_busy {
@@ -1252,14 +1276,14 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
         Paragraph::new("  Tab: next   Enter: apply/confirm   Esc: back")
             .style(Style::default().fg(theme.dimmed))
     };
-    f.render_widget(hint, fields[12]);
+    f.render_widget(hint, fields[14]);
 
     if !app.editor_busy {
         let (row, col) = match app.editor_focus {
             0 => (fields[3].y, fields[3].x + 2 + app.editor_name.len() as u16),
             1 => (fields[6].y, fields[6].x + 2 + app.editor_topic.len() as u16),
             2 => (fields[9].y, fields[9].x + 2 + app.editor_invite_user.len() as u16),
-            _ => return, // leave button — no cursor
+            _ => return, // buttons — no cursor
         };
         f.set_cursor_position((col, row));
     }

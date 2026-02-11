@@ -438,6 +438,17 @@ impl Account {
         Ok(())
     }
 
+    /// Leave and forget a room (removes from room list permanently)
+    pub async fn forget_room(&self, room_id: &OwnedRoomId) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        room.leave().await?;
+        room.forget().await?;
+        Ok(())
+    }
+
     /// Get room topic (from cached state)
     pub fn get_room_topic(&self, room_id: &OwnedRoomId) -> Option<String> {
         let room = self.client.get_room(room_id)?;
