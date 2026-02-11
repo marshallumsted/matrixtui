@@ -366,7 +366,7 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         .border_style(border_style);
 
     if app.messages.is_empty() && app.active_room.is_none() {
-        let welcome = Paragraph::new("\n  Select a room to start chatting\n\n  Ctrl+K  quick room switcher\n  a       add account\n  s       settings\n  ?       help")
+        let welcome = Paragraph::new("\n  Select a room to start chatting\n\n  Ctrl+K  quick room switcher\n  a       add account\n  n       new room\n  e       edit active room\n  s       settings\n  ?       help")
             .style(Style::default().fg(theme.dimmed))
             .block(msg_block);
         f.render_widget(welcome, msg_area);
