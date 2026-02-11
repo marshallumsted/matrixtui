@@ -861,6 +861,7 @@ impl App {
                 self.profile_current_name = self.profile_display_name.clone();
                 self.accounts[idx].display_name = self.profile_display_name.clone();
                 self.status_msg = "Display name updated".to_string();
+                self.overlay = Overlay::None;
             }
             Err(e) => self.profile_error = Some(e.to_string()),
         }
@@ -878,6 +879,7 @@ impl App {
             Ok(()) => {
                 self.profile_current_avatar = self.profile_avatar_url.clone();
                 self.status_msg = "Avatar URL updated".to_string();
+                self.overlay = Overlay::None;
             }
             Err(e) => self.profile_error = Some(e.to_string()),
         }
@@ -895,6 +897,7 @@ impl App {
             Ok(mxc_url) => {
                 self.profile_current_avatar = mxc_url;
                 self.status_msg = "Avatar uploaded".to_string();
+                self.overlay = Overlay::None;
             }
             Err(e) => self.profile_error = Some(e.to_string()),
         }
