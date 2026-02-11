@@ -245,6 +245,15 @@ impl App {
         Ok(())
     }
 
+    fn open_settings(&mut self) {
+        self.overlay = Overlay::Settings;
+        self.settings_selected = 0;
+        self.settings_accounts_open = false;
+        self.settings_account_action_open = false;
+        self.settings_theme_open = false;
+        self.settings_sort_open = false;
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) {
         // Global shortcuts first
         match (key.modifiers, key.code) {
@@ -259,6 +268,15 @@ impl App {
                 return;
             }
             _ => {}
+        }
+
+        // 's' opens settings from any panel when no overlay is active
+        if self.overlay == Overlay::None
+            && self.focus != Focus::Input
+            && key.code == KeyCode::Char('s')
+        {
+            self.open_settings();
+            return;
         }
 
         // Route to overlay or focused panel
@@ -290,14 +308,6 @@ impl App {
                 self.login_password.clear();
                 self.login_focus = 0;
                 self.login_error = None;
-            }
-            KeyCode::Char('s') => {
-                self.overlay = Overlay::Settings;
-                self.settings_selected = 0;
-                self.settings_accounts_open = false;
-                self.settings_account_action_open = false;
-                self.settings_theme_open = false;
-                self.settings_sort_open = false;
             }
             KeyCode::Up => {
                 if self.selected_account > 0 {
@@ -351,14 +361,6 @@ impl App {
                 self.login_password.clear();
                 self.login_focus = 0;
                 self.login_error = None;
-            }
-            (_, KeyCode::Char('s')) => {
-                self.overlay = Overlay::Settings;
-                self.settings_selected = 0;
-                self.settings_accounts_open = false;
-                self.settings_account_action_open = false;
-                self.settings_theme_open = false;
-                self.settings_sort_open = false;
             }
             (_, KeyCode::Char('?')) => self.overlay = Overlay::Help,
             _ => {}
