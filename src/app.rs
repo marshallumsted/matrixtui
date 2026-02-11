@@ -28,6 +28,7 @@ pub enum Overlay {
     Login,
     Help,
     RoomSwitcher,
+    Settings,
 }
 
 /// A message stored for display
@@ -73,6 +74,14 @@ pub struct App {
     pub switcher_query: String,
     pub switcher_selected: usize,
 
+    // Settings overlay state
+    pub settings_selected: usize,
+    pub settings_theme_open: bool,
+    pub settings_theme_selected: usize,
+
+    // Active theme
+    pub theme: ui::Theme,
+
     // Status
     pub status_msg: String,
 
@@ -87,6 +96,7 @@ pub struct App {
 impl App {
     pub fn new(config: Config) -> Self {
         let (matrix_tx, matrix_rx) = mpsc::unbounded_channel();
+        let theme = ui::theme_by_name(&config.theme);
         Self {
             config,
             accounts: Vec::new(),
@@ -111,6 +121,10 @@ impl App {
             login_busy: false,
             switcher_query: String::new(),
             switcher_selected: 0,
+            settings_selected: 0,
+            settings_theme_open: false,
+            settings_theme_selected: 0,
+            theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
             matrix_tx,
@@ -197,6 +211,7 @@ impl App {
                 }
             }
             Overlay::RoomSwitcher => self.handle_switcher_key(key).await,
+            Overlay::Settings => self.handle_settings_key(key),
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
@@ -216,6 +231,11 @@ impl App {
                 self.login_password.clear();
                 self.login_focus = 0;
                 self.login_error = None;
+            }
+            KeyCode::Char('s') => {
+                self.overlay = Overlay::Settings;
+                self.settings_selected = 0;
+                self.settings_theme_open = false;
             }
             KeyCode::Up => {
                 if self.selected_account > 0 {
@@ -260,6 +280,11 @@ impl App {
                 self.login_password.clear();
                 self.login_focus = 0;
                 self.login_error = None;
+            }
+            KeyCode::Char('s') => {
+                self.overlay = Overlay::Settings;
+                self.settings_selected = 0;
+                self.settings_theme_open = false;
             }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             _ => {}
@@ -405,6 +430,64 @@ impl App {
             KeyCode::Backspace => {
                 self.switcher_query.pop();
                 self.switcher_selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                if self.settings_theme_open {
+                    self.settings_theme_open = false;
+                } else {
+                    self.overlay = Overlay::None;
+                }
+            }
+            KeyCode::Up => {
+                if self.settings_theme_open {
+                    self.settings_theme_selected = self.settings_theme_selected.saturating_sub(1);
+                } else {
+                    self.settings_selected = self.settings_selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if self.settings_theme_open {
+                    let count = ui::builtin_themes().len();
+                    if self.settings_theme_selected + 1 < count {
+                        self.settings_theme_selected += 1;
+                    }
+                } else if self.settings_selected < 1 {
+                    self.settings_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if self.settings_theme_open {
+                    // Apply selected theme
+                    let themes = ui::builtin_themes();
+                    if let Some(t) = themes.get(self.settings_theme_selected) {
+                        self.theme = t.clone();
+                        self.config.theme = t.name.to_string();
+                        let _ = self.config.save();
+                    }
+                    self.settings_theme_open = false;
+                } else if self.settings_selected == 0 {
+                    // Add Account — open existing login overlay
+                    self.overlay = Overlay::Login;
+                    self.login_homeserver = "matrix.org".to_string();
+                    self.login_username.clear();
+                    self.login_password.clear();
+                    self.login_focus = 0;
+                    self.login_error = None;
+                } else if self.settings_selected == 1 {
+                    // Expand theme picker
+                    self.settings_theme_open = true;
+                    let themes = ui::builtin_themes();
+                    self.settings_theme_selected = themes
+                        .iter()
+                        .position(|t| t.name == self.theme.name)
+                        .unwrap_or(0);
+                }
             }
             _ => {}
         }

@@ -59,6 +59,7 @@ cargo build --release
 ## Usage
 
 - `a` — add an account
+- `s` — settings / themes
 - `Tab` / arrow keys — navigate panels
 - `Enter` — select room / send message
 - `Ctrl+K` — quick room switcher

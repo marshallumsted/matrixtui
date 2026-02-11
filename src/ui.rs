@@ -5,6 +5,110 @@ use ratatui::{
 
 use crate::app::{App, Focus, Overlay};
 
+// --- Theme system ---
+
+#[derive(Clone)]
+pub struct Theme {
+    pub name: &'static str,
+    pub accent: Color,
+    pub dimmed: Color,
+    pub text: Color,
+    pub text_dim: Color,
+    pub status_ok: Color,
+    pub status_err: Color,
+    pub status_warn: Color,
+    pub status_bg: Color,
+    pub highlight_bg: Color,
+}
+
+pub fn builtin_themes() -> Vec<Theme> {
+    vec![
+        Theme {
+            name: "Default",
+            accent: Color::Cyan,
+            dimmed: Color::DarkGray,
+            text: Color::White,
+            text_dim: Color::Gray,
+            status_ok: Color::Green,
+            status_err: Color::Red,
+            status_warn: Color::Yellow,
+            status_bg: Color::Black,
+            highlight_bg: Color::DarkGray,
+        },
+        Theme {
+            name: "Dracula",
+            accent: Color::Rgb(189, 147, 249),
+            dimmed: Color::Rgb(98, 114, 164),
+            text: Color::Rgb(248, 248, 242),
+            text_dim: Color::Rgb(189, 189, 189),
+            status_ok: Color::Rgb(80, 250, 123),
+            status_err: Color::Rgb(255, 85, 85),
+            status_warn: Color::Rgb(241, 250, 140),
+            status_bg: Color::Rgb(40, 42, 54),
+            highlight_bg: Color::Rgb(68, 71, 90),
+        },
+        Theme {
+            name: "Gruvbox",
+            accent: Color::Rgb(254, 128, 25),
+            dimmed: Color::Rgb(102, 92, 84),
+            text: Color::Rgb(235, 219, 178),
+            text_dim: Color::Rgb(168, 153, 132),
+            status_ok: Color::Rgb(184, 187, 38),
+            status_err: Color::Rgb(251, 73, 52),
+            status_warn: Color::Rgb(250, 189, 47),
+            status_bg: Color::Rgb(40, 40, 40),
+            highlight_bg: Color::Rgb(60, 56, 54),
+        },
+        Theme {
+            name: "Nord",
+            accent: Color::Rgb(136, 192, 208),
+            dimmed: Color::Rgb(76, 86, 106),
+            text: Color::Rgb(236, 239, 244),
+            text_dim: Color::Rgb(216, 222, 233),
+            status_ok: Color::Rgb(163, 190, 140),
+            status_err: Color::Rgb(191, 97, 106),
+            status_warn: Color::Rgb(235, 203, 139),
+            status_bg: Color::Rgb(46, 52, 64),
+            highlight_bg: Color::Rgb(59, 66, 82),
+        },
+        Theme {
+            name: "Monokai",
+            accent: Color::Rgb(166, 226, 46),
+            dimmed: Color::Rgb(117, 113, 94),
+            text: Color::Rgb(248, 248, 242),
+            text_dim: Color::Rgb(191, 191, 191),
+            status_ok: Color::Rgb(166, 226, 46),
+            status_err: Color::Rgb(249, 38, 114),
+            status_warn: Color::Rgb(230, 219, 116),
+            status_bg: Color::Rgb(39, 40, 34),
+            highlight_bg: Color::Rgb(62, 61, 50),
+        },
+        Theme {
+            name: "Solarized",
+            accent: Color::Rgb(38, 139, 210),
+            dimmed: Color::Rgb(88, 110, 117),
+            text: Color::Rgb(131, 148, 150),
+            text_dim: Color::Rgb(101, 123, 131),
+            status_ok: Color::Rgb(133, 153, 0),
+            status_err: Color::Rgb(220, 50, 47),
+            status_warn: Color::Rgb(181, 137, 0),
+            status_bg: Color::Rgb(0, 43, 54),
+            highlight_bg: Color::Rgb(7, 54, 66),
+        },
+    ]
+}
+
+pub fn theme_by_name(name: &str) -> Theme {
+    let themes = builtin_themes();
+    let idx = themes
+        .iter()
+        .position(|t| t.name.eq_ignore_ascii_case(name))
+        .unwrap_or(0);
+    themes.into_iter().nth(idx).unwrap()
+}
+
+// --- Drawing ---
+
 pub fn draw(f: &mut Frame, app: &App) {
     let size = f.area();
     let width = size.width;
@@ -21,8 +125,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Draw overlays on top
     match app.overlay {
         Overlay::Login => draw_login_overlay(f, app),
-        Overlay::Help => draw_help_overlay(f),
+        Overlay::Help => draw_help_overlay(f, &app.theme),
         Overlay::RoomSwitcher => draw_switcher_overlay(f, app),
+        Overlay::Settings => draw_settings_overlay(f, app),
         Overlay::None => {}
     }
 }
@@ -83,11 +188,12 @@ fn draw_single_column(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_accounts_panel(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
     let focused = app.focus == Focus::Accounts;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.dimmed)
     };
     let block = Block::default()
         .title(" Accounts ")
@@ -103,7 +209,9 @@ fn draw_accounts_panel(f: &mut Frame, app: &App, area: Rect) {
             // Show short homeserver name
             let label = &acct.homeserver;
             let style = if i == app.selected_account {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -114,7 +222,7 @@ fn draw_accounts_panel(f: &mut Frame, app: &App, area: Rect) {
     items.push(ListItem::new("").style(Style::default()));
     items.push(
         ListItem::new(" [a] Add")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(theme.dimmed)),
     );
 
     let list = List::new(items).block(block);
@@ -122,11 +230,12 @@ fn draw_accounts_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
     let focused = app.focus == Focus::Rooms;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.dimmed)
     };
     let block = Block::default()
         .title(" Rooms ")
@@ -149,13 +258,17 @@ fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
             let is_selected = i == app.selected_room;
 
             let style = if is_active {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
             } else if is_selected && focused {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
+                Style::default().fg(theme.text).bg(theme.highlight_bg)
             } else if room.unread > 0 {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.text)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.text_dim)
             };
 
             // Truncate name to fit
@@ -172,7 +285,7 @@ fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
 
     if items.is_empty() {
         let empty = Paragraph::new(" No rooms yet\n\n Press 'a' to\n add an account")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(theme.dimmed))
             .block(block);
         f.render_widget(empty, area);
     } else {
@@ -182,11 +295,12 @@ fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
     let focused = app.focus == Focus::Chat || app.focus == Focus::Input;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.dimmed)
     };
 
     let title = if let Some(room_id) = &app.active_room {
@@ -215,8 +329,8 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         .border_style(border_style);
 
     if app.messages.is_empty() && app.active_room.is_none() {
-        let welcome = Paragraph::new("\n  Select a room to start chatting\n\n  Ctrl+K  quick room switcher\n  a       add account\n  ?       help")
-            .style(Style::default().fg(Color::DarkGray))
+        let welcome = Paragraph::new("\n  Select a room to start chatting\n\n  Ctrl+K  quick room switcher\n  a       add account\n  s       settings\n  ?       help")
+            .style(Style::default().fg(theme.dimmed))
             .block(msg_block);
         f.render_widget(welcome, msg_area);
     } else {
@@ -238,7 +352,9 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                 vec![
                     Line::from(Span::styled(
                         format!("  {}", msg.sender),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
                     )),
                     Line::from(Span::raw(format!("  {}", msg.body))),
                     Line::from(""),
@@ -253,9 +369,9 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
     // Input box
     let input_focused = app.focus == Focus::Input;
     let input_style = if input_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.dimmed)
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -275,14 +391,15 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
     let mut spans = Vec::new();
 
     // Account status dots
     for acct in &app.accounts {
         let color = if acct.syncing {
-            Color::Green
+            theme.status_ok
         } else {
-            Color::Red
+            theme.status_err
         };
         spans.push(Span::styled("● ", Style::default().fg(color)));
         spans.push(Span::raw(format!("{}  ", acct.homeserver)));
@@ -290,29 +407,30 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     // Separator
     if !app.accounts.is_empty() {
-        spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("│ ", Style::default().fg(theme.dimmed)));
     }
 
     // Status message
     spans.push(Span::styled(
         &app.status_msg,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.dimmed),
     ));
 
     // Shortcuts hint (right-aligned would be nice but keep it simple)
     let status = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(theme.status_bg));
     f.render_widget(status, area);
 }
 
 fn draw_login_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
     let area = centered_rect(50, 14, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .title(" Add Account ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme.accent));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -334,12 +452,12 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
         ])
         .split(inner);
 
-    let hs_style = field_style(app.login_focus == 0);
-    let un_style = field_style(app.login_focus == 1);
-    let pw_style = field_style(app.login_focus == 2);
+    let hs_style = field_style(app.login_focus == 0, theme);
+    let un_style = field_style(app.login_focus == 1, theme);
+    let pw_style = field_style(app.login_focus == 2, theme);
 
     f.render_widget(
-        Paragraph::new("Homeserver:").style(Style::default().fg(Color::Gray)),
+        Paragraph::new("Homeserver:").style(Style::default().fg(theme.text_dim)),
         fields[0],
     );
     f.render_widget(
@@ -348,7 +466,7 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
     );
 
     f.render_widget(
-        Paragraph::new("Username:").style(Style::default().fg(Color::Gray)),
+        Paragraph::new("Username:").style(Style::default().fg(theme.text_dim)),
         fields[3],
     );
     f.render_widget(
@@ -357,7 +475,7 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
     );
 
     f.render_widget(
-        Paragraph::new("Password:").style(Style::default().fg(Color::Gray)),
+        Paragraph::new("Password:").style(Style::default().fg(theme.text_dim)),
         fields[6],
     );
     let masked: String = "●".repeat(app.login_password.len());
@@ -368,12 +486,12 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
 
     // Error or hint
     let hint = if let Some(err) = &app.login_error {
-        Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red))
+        Paragraph::new(err.as_str()).style(Style::default().fg(theme.status_err))
     } else if app.login_busy {
-        Paragraph::new("Logging in...").style(Style::default().fg(Color::Yellow))
+        Paragraph::new("Logging in...").style(Style::default().fg(theme.status_warn))
     } else {
         Paragraph::new("Tab: next field  Enter: login  Esc: cancel")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(theme.dimmed))
     };
     f.render_widget(hint, fields[9]);
 
@@ -389,14 +507,14 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_help_overlay(f: &mut Frame) {
-    let area = centered_rect(60, 20, f.area());
+fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
+    let area = centered_rect(60, 22, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .title(" Help ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme.accent));
 
     let help_text = vec![
         "",
@@ -410,6 +528,7 @@ fn draw_help_overlay(f: &mut Frame) {
         "    Ctrl+K           Quick room switcher",
         "    Ctrl+Q           Quit",
         "    a                Add account",
+        "    s                Settings / themes",
         "    ?                Toggle this help",
         "",
         "  Chat:",
@@ -425,13 +544,14 @@ fn draw_help_overlay(f: &mut Frame) {
 }
 
 fn draw_switcher_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
     let area = centered_rect(50, 12, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .title(" Jump to room ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme.accent));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -454,7 +574,7 @@ fn draw_switcher_overlay(f: &mut Frame, app: &App) {
     // Separator
     f.render_widget(
         Paragraph::new("─".repeat(layout[1].width as usize))
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(theme.dimmed)),
         layout[1],
     );
 
@@ -467,7 +587,7 @@ fn draw_switcher_overlay(f: &mut Frame, app: &App) {
         .map(|(i, room)| {
             let prefix = if room.is_dm { " @" } else { " #" };
             let style = if i == app.switcher_selected {
-                Style::default().fg(Color::Cyan).bg(Color::DarkGray)
+                Style::default().fg(theme.accent).bg(theme.highlight_bg)
             } else {
                 Style::default()
             };
@@ -486,11 +606,114 @@ fn draw_switcher_overlay(f: &mut Frame, app: &App) {
     f.render_widget(list, layout[2]);
 }
 
-fn field_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::White).bg(Color::DarkGray)
+fn draw_settings_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let height: u16 = if app.settings_theme_open { 13 } else { 7 };
+    let area = centered_rect(50, height, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Settings ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Top padding
+    lines.push(Line::from(""));
+
+    // Add Account item
+    let sel0 = !app.settings_theme_open && app.settings_selected == 0;
+    let prefix0 = if sel0 { "  > " } else { "    " };
+    let style0 = if sel0 {
+        Style::default()
+            .fg(theme.text)
+            .bg(theme.highlight_bg)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(theme.text_dim)
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{}Add Account", prefix0),
+        style0,
+    )));
+
+    // Theme item
+    let sel1 = !app.settings_theme_open && app.settings_selected == 1;
+    let (prefix1, style1) = if sel1 {
+        (
+            "  > ",
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if app.settings_theme_open {
+        (
+            "  \u{25b8} ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("    ", Style::default().fg(theme.text_dim))
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{}Theme: {}", prefix1, app.theme.name),
+        style1,
+    )));
+
+    // Theme sub-list when expanded
+    if app.settings_theme_open {
+        let themes = builtin_themes();
+        for (i, t) in themes.iter().enumerate() {
+            let is_active = t.name == app.theme.name;
+            let is_sel = i == app.settings_theme_selected;
+            let prefix = if is_sel { "      > " } else { "        " };
+            let suffix = if is_active { " \u{2713}" } else { "" };
+            let style = if is_sel {
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_active {
+                Style::default().fg(theme.accent)
+            } else {
+                Style::default().fg(theme.text_dim)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}{}", prefix, t.name, suffix),
+                style,
+            )));
+        }
+    }
+
+    // Bottom padding
+    lines.push(Line::from(""));
+
+    // Hint
+    let hint_text = if app.settings_theme_open {
+        "  \u{2191}/\u{2193} select   Enter apply   Esc back"
+    } else {
+        "  \u{2191}/\u{2193} select   Enter open   Esc back"
+    };
+    lines.push(Line::from(Span::styled(
+        hint_text,
+        Style::default().fg(theme.dimmed),
+    )));
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, inner);
+}
+
+fn field_style(focused: bool, theme: &Theme) -> Style {
+    if focused {
+        Style::default().fg(theme.text).bg(theme.highlight_bg)
+    } else {
+        Style::default().fg(theme.text_dim)
     }
 }
 

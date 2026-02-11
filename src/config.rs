@@ -29,6 +29,8 @@ pub struct SavedAccount {
 pub struct Config {
     #[serde(default)]
     pub accounts: Vec<SavedAccount>,
+    #[serde(default)]
+    pub theme: String,
 }
 
 impl Config {
