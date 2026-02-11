@@ -1010,7 +1010,7 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
 
 fn draw_creator_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 18, f.area());
+    let area = centered_rect(50, 20, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1025,6 +1025,8 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
+            Constraint::Length(1), // account selector
+            Constraint::Length(1), // spacer
             Constraint::Length(1), // label
             Constraint::Length(1), // name field
             Constraint::Length(1), // spacer
@@ -1042,67 +1044,85 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
         ])
         .split(inner);
 
-    let s0 = field_style(app.creator_focus == 0, theme);
+    // Account selector (focus 0)
+    let acct_label = if app.accounts.is_empty() {
+        "(no accounts)".to_string()
+    } else {
+        let acct = &app.accounts[app.creator_account_idx.min(app.accounts.len() - 1)];
+        acct.user_id.clone()
+    };
+    let acct_style = if app.creator_focus == 0 {
+        Style::default().fg(theme.text).bg(theme.highlight_bg)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+    let arrows = if app.accounts.len() > 1 { "◄ ► " } else { "" };
+    f.render_widget(
+        Paragraph::new(format!("  Account:  {}[{}]", arrows, acct_label)).style(acct_style),
+        fields[0],
+    );
+
     let s1 = field_style(app.creator_focus == 1, theme);
-    let s5 = field_style(app.creator_focus == 5, theme);
+    let s2 = field_style(app.creator_focus == 2, theme);
+    let s6 = field_style(app.creator_focus == 6, theme);
 
     f.render_widget(
         Paragraph::new("  Name:").style(Style::default().fg(theme.text_dim)),
-        fields[0],
+        fields[2],
     );
     f.render_widget(
-        Paragraph::new(format!("  {}", app.creator_name)).style(s0),
-        fields[1],
-    );
-    f.render_widget(
-        Paragraph::new("  Topic:").style(Style::default().fg(theme.text_dim)),
+        Paragraph::new(format!("  {}", app.creator_name)).style(s1),
         fields[3],
     );
     f.render_widget(
-        Paragraph::new(format!("  {}", app.creator_topic)).style(s1),
-        fields[4],
+        Paragraph::new("  Topic:").style(Style::default().fg(theme.text_dim)),
+        fields[5],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.creator_topic)).style(s2),
+        fields[6],
     );
 
     let vis_label = if app.creator_visibility == 1 { "Public" } else { "Private" };
-    let vis_style = if app.creator_focus == 2 {
+    let vis_style = if app.creator_focus == 3 {
         Style::default().fg(theme.text).bg(theme.highlight_bg)
     } else {
         Style::default().fg(theme.text_dim)
     };
     f.render_widget(
         Paragraph::new(format!("  Visibility:   [{}]", vis_label)).style(vis_style),
-        fields[6],
+        fields[8],
     );
 
     let e2ee_label = if app.creator_e2ee { "On" } else { "Off" };
-    let e2ee_style = if app.creator_focus == 3 {
+    let e2ee_style = if app.creator_focus == 4 {
         Style::default().fg(theme.text).bg(theme.highlight_bg)
     } else {
         Style::default().fg(theme.text_dim)
     };
     f.render_widget(
         Paragraph::new(format!("  Encryption:   [{}]", e2ee_label)).style(e2ee_style),
-        fields[7],
+        fields[9],
     );
 
     let fed_label = if app.creator_federated { "Yes" } else { "No" };
-    let fed_style = if app.creator_focus == 4 {
+    let fed_style = if app.creator_focus == 5 {
         Style::default().fg(theme.text).bg(theme.highlight_bg)
     } else {
         Style::default().fg(theme.text_dim)
     };
     f.render_widget(
         Paragraph::new(format!("  Federated:    [{}]", fed_label)).style(fed_style),
-        fields[8],
+        fields[10],
     );
 
     f.render_widget(
         Paragraph::new("  Invite (comma-separated):").style(Style::default().fg(theme.text_dim)),
-        fields[10],
+        fields[12],
     );
     f.render_widget(
-        Paragraph::new(format!("  {}", app.creator_invite)).style(s5),
-        fields[11],
+        Paragraph::new(format!("  {}", app.creator_invite)).style(s6),
+        fields[13],
     );
 
     let hint = if let Some(err) = &app.creator_error {
@@ -1113,14 +1133,14 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
         Paragraph::new("  Tab: next  Space: toggle  Enter: create  Esc: cancel")
             .style(Style::default().fg(theme.dimmed))
     };
-    f.render_widget(hint, fields[13]);
+    f.render_widget(hint, fields[15]);
 
     if !app.creator_busy {
         let (row, col) = match app.creator_focus {
-            0 => (fields[1].y, fields[1].x + 2 + app.creator_name.len() as u16),
-            1 => (fields[4].y, fields[4].x + 2 + app.creator_topic.len() as u16),
-            5 => (fields[11].y, fields[11].x + 2 + app.creator_invite.len() as u16),
-            _ => return, // toggle fields — no cursor
+            1 => (fields[3].y, fields[3].x + 2 + app.creator_name.len() as u16),
+            2 => (fields[6].y, fields[6].x + 2 + app.creator_topic.len() as u16),
+            6 => (fields[13].y, fields[13].x + 2 + app.creator_invite.len() as u16),
+            _ => return, // toggle/selector fields — no cursor
         };
         f.set_cursor_position((col, row));
     }

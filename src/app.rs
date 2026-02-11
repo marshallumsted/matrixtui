@@ -150,6 +150,7 @@ pub struct App {
     pub creator_e2ee: bool,
     pub creator_federated: bool,
     pub creator_invite: String,
+    pub creator_account_idx: usize,
     pub creator_focus: usize,
     pub creator_error: Option<String>,
     pub creator_busy: bool,
@@ -234,6 +235,7 @@ impl App {
             creator_e2ee: true,
             creator_federated: true,
             creator_invite: String::new(),
+            creator_account_idx: 0,
             creator_focus: 0,
             creator_error: None,
             creator_busy: false,
@@ -490,6 +492,11 @@ impl App {
         self.creator_e2ee = true;
         self.creator_federated = true;
         self.creator_invite.clear();
+        self.creator_account_idx = self
+            .accounts
+            .iter()
+            .position(|a| Some(&a.user_id) == self.active_account_id.as_ref())
+            .unwrap_or(0);
         self.creator_focus = 0;
         self.creator_error = None;
         self.creator_busy = false;
@@ -499,28 +506,45 @@ impl App {
         if self.creator_busy {
             return;
         }
+        // Focus: 0=account, 1=name, 2=topic, 3=visibility, 4=e2ee, 5=federated, 6=invite
         match key.code {
             KeyCode::Tab => {
-                self.creator_focus = (self.creator_focus + 1) % 6;
+                self.creator_focus = (self.creator_focus + 1) % 7;
             }
             KeyCode::BackTab => {
-                self.creator_focus = if self.creator_focus == 0 { 5 } else { self.creator_focus - 1 };
+                self.creator_focus = if self.creator_focus == 0 { 6 } else { self.creator_focus - 1 };
             }
             KeyCode::Enter => {
                 match self.creator_focus {
-                    2 => self.creator_visibility = 1 - self.creator_visibility,
-                    3 => self.creator_e2ee = !self.creator_e2ee,
-                    4 => self.creator_federated = !self.creator_federated,
+                    0 if self.accounts.len() > 1 => {
+                        self.creator_account_idx = (self.creator_account_idx + 1) % self.accounts.len();
+                    }
+                    3 => self.creator_visibility = 1 - self.creator_visibility,
+                    4 => self.creator_e2ee = !self.creator_e2ee,
+                    5 => self.creator_federated = !self.creator_federated,
                     _ => self.do_create_room().await,
                 }
             }
-            KeyCode::Char(' ') if self.creator_focus == 2 => {
-                self.creator_visibility = 1 - self.creator_visibility;
+            KeyCode::Left if self.creator_focus == 0 && self.accounts.len() > 1 => {
+                self.creator_account_idx = if self.creator_account_idx == 0 {
+                    self.accounts.len() - 1
+                } else {
+                    self.creator_account_idx - 1
+                };
+            }
+            KeyCode::Right if self.creator_focus == 0 && self.accounts.len() > 1 => {
+                self.creator_account_idx = (self.creator_account_idx + 1) % self.accounts.len();
+            }
+            KeyCode::Char(' ') if self.creator_focus == 0 && self.accounts.len() > 1 => {
+                self.creator_account_idx = (self.creator_account_idx + 1) % self.accounts.len();
             }
             KeyCode::Char(' ') if self.creator_focus == 3 => {
-                self.creator_e2ee = !self.creator_e2ee;
+                self.creator_visibility = 1 - self.creator_visibility;
             }
             KeyCode::Char(' ') if self.creator_focus == 4 => {
+                self.creator_e2ee = !self.creator_e2ee;
+            }
+            KeyCode::Char(' ') if self.creator_focus == 5 => {
                 self.creator_federated = !self.creator_federated;
             }
             KeyCode::Esc => {
@@ -528,17 +552,17 @@ impl App {
             }
             KeyCode::Char(c) => {
                 match self.creator_focus {
-                    0 => self.creator_name.push(c),
-                    1 => self.creator_topic.push(c),
-                    5 => self.creator_invite.push(c),
+                    1 => self.creator_name.push(c),
+                    2 => self.creator_topic.push(c),
+                    6 => self.creator_invite.push(c),
                     _ => {}
                 }
             }
             KeyCode::Backspace => {
                 match self.creator_focus {
-                    0 => { self.creator_name.pop(); }
-                    1 => { self.creator_topic.pop(); }
-                    5 => { self.creator_invite.pop(); }
+                    1 => { self.creator_name.pop(); }
+                    2 => { self.creator_topic.pop(); }
+                    6 => { self.creator_invite.pop(); }
                     _ => {}
                 }
             }
@@ -551,11 +575,7 @@ impl App {
             self.creator_error = Some("Room name is required".to_string());
             return;
         }
-        let account_idx = self
-            .accounts
-            .iter()
-            .position(|a| Some(&a.user_id) == self.active_account_id.as_ref())
-            .unwrap_or(0);
+        let account_idx = self.creator_account_idx;
         if account_idx >= self.accounts.len() {
             self.creator_error = Some("No account available".to_string());
             return;
