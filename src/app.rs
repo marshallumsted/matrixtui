@@ -2,6 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use matrix_sdk::ruma::OwnedRoomId;
 use ratatui::prelude::*;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
@@ -53,6 +54,7 @@ pub struct App {
     // Chat state
     pub messages: Vec<DisplayMessage>,
     pub scroll_offset: usize,
+    pub room_messages: HashMap<OwnedRoomId, Vec<DisplayMessage>>,
 
     // Input state
     pub input: String,
@@ -96,6 +98,7 @@ impl App {
             active_account_id: None,
             messages: Vec::new(),
             scroll_offset: 0,
+            room_messages: HashMap::new(),
             input: String::new(),
             cursor_pos: 0,
             login_homeserver: String::new(),
@@ -455,14 +458,19 @@ impl App {
             match account.send_message(&room_id, body).await {
                 Ok(_) => {
                     // Local echo — show our own message immediately
-                    self.messages.push(DisplayMessage {
+                    let msg = DisplayMessage {
                         sender: account.user_id.clone(),
                         body: body.to_string(),
                         timestamp: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs(),
-                    });
+                    };
+                    self.messages.push(msg.clone());
+                    self.room_messages
+                        .entry(room_id)
+                        .or_default()
+                        .push(msg);
                     self.scroll_offset = 0;
                 }
                 Err(e) => {
@@ -480,32 +488,69 @@ impl App {
                 body,
                 timestamp,
             } => {
+                let msg = DisplayMessage {
+                    sender: sender.to_string(),
+                    body,
+                    timestamp,
+                };
+
+                // Always cache in per-room store
+                self.room_messages
+                    .entry(room_id.clone())
+                    .or_default()
+                    .push(msg.clone());
+
                 // If this message is for the active room, add to display
                 if Some(&room_id) == self.active_room.as_ref() {
-                    self.messages.push(DisplayMessage {
-                        sender: sender.to_string(),
-                        body,
-                        timestamp,
-                    });
+                    self.messages.push(msg);
                 }
             }
             MatrixEvent::RoomsUpdated { .. } => {
                 self.refresh_rooms().await;
             }
             MatrixEvent::SyncComplete { account_id } => {
-                // Track sync state per account
+                info!("SyncComplete for {}", account_id);
                 if let Some(acct) = self.accounts.iter_mut().find(|a| a.user_id == account_id) {
-                    acct.display_name = format!("{} (synced)", acct.homeserver);
+                    acct.sync_complete = true;
                 }
-                let synced: Vec<_> = self.accounts.iter()
-                    .map(|a| format!("{}: OK", a.homeserver))
+
+                // Update status to reflect actual per-account sync state
+                let states: Vec<_> = self.accounts.iter()
+                    .map(|a| {
+                        let state = if a.sync_complete { "synced" } else { "syncing" };
+                        format!("{}: {}", a.homeserver, state)
+                    })
                     .collect();
-                self.status_msg = synced.join(" | ");
+                self.status_msg = states.join(" | ");
                 self.refresh_rooms().await;
+
+                // Re-fetch history if viewing a room from this account with empty messages
+                if let (Some(room_id), Some(active_aid)) =
+                    (self.active_room.clone(), self.active_account_id.clone())
+                {
+                    if active_aid == account_id && self.messages.is_empty() {
+                        info!("Re-fetching history after sync for {}", account_id);
+                        if let Some(account) =
+                            self.accounts.iter().find(|a| a.user_id == account_id)
+                        {
+                            match account.fetch_history(&room_id, 50).await {
+                                Ok(msgs) => {
+                                    let count = msgs.len();
+                                    self.messages = msgs;
+                                    info!("Re-fetch got {} messages", count);
+                                }
+                                Err(e) => {
+                                    info!("Re-fetch failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             MatrixEvent::SyncError { account_id, error } => {
                 if let Some(acct) = self.accounts.iter_mut().find(|a| a.user_id == account_id) {
                     acct.syncing = false;
+                    acct.sync_complete = false;
                 }
                 self.status_msg = format!("{}: sync error — {}", account_id, error);
             }
@@ -531,17 +576,37 @@ impl App {
             let account_id = room.account_id.clone();
             let room_name = room.name.clone();
 
+            // Save current room's messages before switching
+            if let Some(prev_room_id) = &self.active_room {
+                if !self.messages.is_empty() {
+                    self.room_messages
+                        .insert(prev_room_id.clone(), self.messages.clone());
+                }
+            }
+
             self.active_room = Some(room_id.clone());
             self.active_account_id = Some(account_id.clone());
             self.messages.clear();
             self.scroll_offset = 0;
             self.focus = Focus::Chat;
-            self.status_msg = format!("Loading {}...", room_name);
 
-            // Fetch history
+            let account_synced = self
+                .accounts
+                .iter()
+                .find(|a| a.user_id == account_id)
+                .map(|a| a.sync_complete)
+                .unwrap_or(false);
+
+            if !account_synced {
+                self.status_msg = format!("{} — waiting for sync...", room_name);
+            } else {
+                self.status_msg = format!("Loading {}...", room_name);
+            }
+
+            // Try fetch_history first
             if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
                 match account.fetch_history(&room_id, 50).await {
-                    Ok(msgs) => {
+                    Ok(msgs) if !msgs.is_empty() => {
                         let count = msgs.len();
                         self.messages = msgs;
                         self.status_msg = format!(
@@ -549,9 +614,35 @@ impl App {
                             room_name, account_id, count
                         );
                     }
+                    Ok(_) => {
+                        // fetch_history returned empty — fall back to cached messages from sync
+                        if let Some(cached) = self.room_messages.get(&room_id) {
+                            let count = cached.len();
+                            self.messages = cached.clone();
+                            self.status_msg = format!(
+                                "{} ({}) — {} cached messages",
+                                room_name, account_id, count
+                            );
+                        } else if account_synced {
+                            self.status_msg =
+                                format!("{} ({}) — no messages", room_name, account_id);
+                        }
+                        // If not synced, status already says "waiting for sync"
+                    }
                     Err(e) => {
-                        self.status_msg =
-                            format!("{} ({}) — history failed: {}", room_name, account_id, e);
+                        // History fetch failed — try cache
+                        info!("fetch_history error for {}: {}", room_id, e);
+                        if let Some(cached) = self.room_messages.get(&room_id) {
+                            let count = cached.len();
+                            self.messages = cached.clone();
+                            self.status_msg = format!(
+                                "{} ({}) — {} cached messages (history error)",
+                                room_name, account_id, count
+                            );
+                        } else {
+                            self.status_msg =
+                                format!("{} ({}) — history failed: {}", room_name, account_id, e);
+                        }
                     }
                 }
             } else {
@@ -559,7 +650,11 @@ impl App {
                     "{} — account not found: {} (have: {})",
                     room_name,
                     account_id,
-                    self.accounts.iter().map(|a| a.user_id.as_str()).collect::<Vec<_>>().join(", ")
+                    self.accounts
+                        .iter()
+                        .map(|a| a.user_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }

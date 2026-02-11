@@ -59,6 +59,7 @@ pub struct Account {
     pub homeserver: String,
     pub display_name: String,
     pub syncing: bool,
+    pub sync_complete: bool,
 }
 
 impl Account {
@@ -98,6 +99,7 @@ impl Account {
             homeserver: homeserver.to_string(),
             client,
             syncing: false,
+            sync_complete: false,
         };
 
         Ok((account, saved))
@@ -133,6 +135,7 @@ impl Account {
             homeserver: saved.homeserver.clone(),
             client,
             syncing: false,
+            sync_complete: false,
         })
     }
 
