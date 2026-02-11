@@ -532,16 +532,16 @@ impl App {
             if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
                 match account.fetch_history(&room_id, 50).await {
                     Ok(msgs) => {
+                        let count = msgs.len();
                         self.messages = msgs;
                         self.status_msg = format!(
-                            "{} — {} messages loaded",
-                            room_name,
-                            self.messages.len()
+                            "{} ({}) — {} messages",
+                            room_name, account_id, count
                         );
                     }
                     Err(e) => {
                         self.status_msg =
-                            format!("{} — history load failed: {}", room_name, e);
+                            format!("{} ({}) — history failed: {}", room_name, account_id, e);
                     }
                 }
             }

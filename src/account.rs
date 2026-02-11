@@ -233,11 +233,24 @@ impl Account {
             .get_room(room_id)
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
 
-        let options = MessagesOptions::backward().from(
-            room.last_prev_batch().as_deref(),
+        let prev_batch = room.last_prev_batch();
+        info!(
+            "fetch_history for {} — prev_batch: {:?}",
+            room_id,
+            prev_batch.as_deref().unwrap_or("None")
         );
 
+        let mut options = MessagesOptions::backward();
+        if prev_batch.is_some() {
+            options = options.from(prev_batch.as_deref());
+        }
+
         let response = room.messages(options).await?;
+        info!(
+            "fetch_history got {} events, end token: {:?}",
+            response.chunk.len(),
+            response.end
+        );
         let mut messages = Vec::new();
 
         for timeline_event in &response.chunk {
