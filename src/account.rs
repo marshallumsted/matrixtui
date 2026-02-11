@@ -226,7 +226,7 @@ impl Account {
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
 
         let options = MessagesOptions::backward().from(
-            room.last_prev_batch(),
+            room.last_prev_batch().as_deref(),
         );
 
         let response = room.messages(options).await?;
