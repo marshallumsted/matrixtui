@@ -6,7 +6,7 @@ description = "Multi-account terminal Matrix client"
 license = "MIT"
 
 [[bin]]
-name = "mt"
+name = "mtui"
 path = "src/main.rs"
 
 [dependencies]
