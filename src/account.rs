@@ -12,7 +12,7 @@ use matrix_sdk::{
 };
 use std::path::PathBuf;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::config::{SavedAccount, data_dir};
 
@@ -190,24 +190,23 @@ impl Account {
     }
 
     /// Get joined rooms as RoomInfo
-    pub fn rooms(&self) -> Vec<RoomInfo> {
-        self.client
-            .joined_rooms()
-            .into_iter()
-            .map(|room| {
-                let name = room
-                    .cached_display_name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| room.room_id().to_string());
-                RoomInfo {
-                    id: room.room_id().to_owned(),
-                    name,
-                    is_dm: room.is_direct().unwrap_or(false),
-                    unread: room.num_unread_notifications().into(),
-                    account_id: self.user_id.clone(),
-                }
-            })
-            .collect()
+    pub async fn rooms(&self) -> Vec<RoomInfo> {
+        let mut result = Vec::new();
+        for room in self.client.joined_rooms() {
+            let name = room
+                .cached_display_name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| room.room_id().to_string());
+            let is_dm = room.is_direct().await.unwrap_or(false);
+            result.push(RoomInfo {
+                id: room.room_id().to_owned(),
+                name,
+                is_dm,
+                unread: room.num_unread_notifications().into(),
+                account_id: self.user_id.clone(),
+            });
+        }
+        result
     }
 
     /// Send a text message to a room
@@ -230,7 +229,7 @@ fn normalize_homeserver(hs: &str) -> String {
     }
 }
 
-fn session_db_path(user_id: &str, homeserver: &str) -> PathBuf {
+fn session_db_path(user_id: &str, _homeserver: &str) -> PathBuf {
     let safe_id = user_id.replace(['@', ':', '.'], "_");
     data_dir().join("sessions").join(safe_id)
 }

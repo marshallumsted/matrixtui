@@ -3,7 +3,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, DisplayMessage, Focus, Overlay};
+use crate::app::{App, Focus, Overlay};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let size = f.area();

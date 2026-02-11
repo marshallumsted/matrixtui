@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::account::{Account, MatrixEvent, RoomInfo};
-use crate::config::{Config, SavedAccount};
+use crate::config::Config;
 use crate::event::{AppEvent, spawn_input_reader, spawn_matrix_bridge};
 use crate::ui;
 
@@ -128,7 +128,7 @@ impl App {
                 }
             }
         }
-        self.refresh_rooms();
+        self.refresh_rooms().await;
         if !self.accounts.is_empty() {
             self.status_msg = format!("{} account(s) connected", self.accounts.len());
         }
@@ -153,7 +153,7 @@ impl App {
                 match event {
                     AppEvent::Key(key) => self.handle_key(key).await,
                     AppEvent::Resize(_, _) => {} // ratatui handles this on next draw
-                    AppEvent::Matrix(mev) => self.handle_matrix_event(mev),
+                    AppEvent::Matrix(mev) => self.handle_matrix_event(mev).await,
                     AppEvent::Tick => {}
                 }
             }
@@ -426,7 +426,7 @@ impl App {
                 }
                 self.status_msg = format!("Logged in as {}", account.user_id);
                 self.accounts.push(account);
-                self.refresh_rooms();
+                self.refresh_rooms().await;
                 self.overlay = Overlay::None;
             }
             Err(e) => {
@@ -455,7 +455,7 @@ impl App {
         }
     }
 
-    fn handle_matrix_event(&mut self, event: MatrixEvent) {
+    async fn handle_matrix_event(&mut self, event: MatrixEvent) {
         match event {
             MatrixEvent::Message {
                 room_id,
@@ -473,11 +473,11 @@ impl App {
                 }
             }
             MatrixEvent::RoomsUpdated { .. } => {
-                self.refresh_rooms();
+                self.refresh_rooms().await;
             }
             MatrixEvent::SyncComplete { account_id } => {
                 self.status_msg = format!("{}: synced", account_id);
-                self.refresh_rooms();
+                self.refresh_rooms().await;
             }
             MatrixEvent::SyncError { account_id, error } => {
                 self.status_msg = format!("{}: sync error — {}", account_id, error);
@@ -485,10 +485,10 @@ impl App {
         }
     }
 
-    pub fn refresh_rooms(&mut self) {
+    pub async fn refresh_rooms(&mut self) {
         self.all_rooms.clear();
         for account in &self.accounts {
-            self.all_rooms.extend(account.rooms());
+            self.all_rooms.extend(account.rooms().await);
         }
         // Sort: rooms with unread first, then alphabetical
         self.all_rooms.sort_by(|a, b| {
