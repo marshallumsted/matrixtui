@@ -5,6 +5,10 @@ edition = "2024"
 description = "Multi-account terminal Matrix client"
 license = "MIT"
 
+[[bin]]
+name = "mt"
+path = "src/main.rs"
+
 [dependencies]
 # TUI
 ratatui = "0.29"
