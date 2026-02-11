@@ -3,10 +3,14 @@ use matrix_sdk::{
     Client, Room, SessionMeta, SessionTokens,
     authentication::matrix::MatrixSession,
     config::SyncSettings,
+    room::MessagesOptions,
     ruma::{
         OwnedRoomId, OwnedUserId, UserId,
-        events::room::message::{
-            MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+        events::{
+            AnyMessageLikeEvent, AnyTimelineEvent,
+            room::message::{
+                MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+            },
         },
     },
 };
@@ -207,6 +211,57 @@ impl Account {
             });
         }
         result
+    }
+
+    /// Fetch recent message history for a room
+    pub async fn fetch_history(
+        &self,
+        room_id: &OwnedRoomId,
+        limit: u32,
+    ) -> Result<Vec<crate::app::DisplayMessage>> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+
+        let options = MessagesOptions::backward().from(
+            room.last_prev_batch_token().await?,
+        );
+
+        let response = room.messages(options).await?;
+        let mut messages = Vec::new();
+
+        for event in &response.chunk {
+            let event = match event.event.deserialize() {
+                Ok(AnyTimelineEvent::MessageLike(
+                    AnyMessageLikeEvent::RoomMessage(msg),
+                )) => msg,
+                _ => continue,
+            };
+
+            match event {
+                matrix_sdk::ruma::events::room::message::RoomMessageEvent::Original(original) => {
+                    if let MessageType::Text(text) = &original.content.msgtype {
+                        messages.push(crate::app::DisplayMessage {
+                            sender: original.sender.to_string(),
+                            body: text.body.clone(),
+                            timestamp: original.origin_server_ts.as_secs().into(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Messages come newest-first from backward pagination, reverse for chronological
+        messages.reverse();
+
+        // Only keep the last `limit` messages
+        if messages.len() > limit as usize {
+            messages = messages.split_off(messages.len() - limit as usize);
+        }
+
+        Ok(messages)
     }
 
     /// Send a text message to a room

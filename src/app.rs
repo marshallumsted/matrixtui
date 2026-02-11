@@ -186,10 +186,10 @@ impl App {
                     self.overlay = Overlay::None;
                 }
             }
-            Overlay::RoomSwitcher => self.handle_switcher_key(key),
+            Overlay::RoomSwitcher => self.handle_switcher_key(key).await,
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
-                Focus::Rooms => self.handle_rooms_key(key),
+                Focus::Rooms => self.handle_rooms_key(key).await,
                 Focus::Chat => self.handle_chat_key(key),
                 Focus::Input => self.handle_input_key(key).await,
                 Focus::LoginOverlay => {}
@@ -224,7 +224,7 @@ impl App {
         }
     }
 
-    fn handle_rooms_key(&mut self, key: KeyEvent) {
+    async fn handle_rooms_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up => {
                 if self.selected_room > 0 {
@@ -237,14 +237,7 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some(room) = self.all_rooms.get(self.selected_room) {
-                    self.active_room = Some(room.id.clone());
-                    self.active_account_id = Some(room.account_id.clone());
-                    self.messages.clear();
-                    self.scroll_offset = 0;
-                    self.focus = Focus::Chat;
-                    self.status_msg = format!("Opened {}", room.name);
-                }
+                self.open_selected_room().await;
             }
             KeyCode::Tab => self.focus = Focus::Chat,
             KeyCode::BackTab => self.focus = Focus::Accounts,
@@ -370,7 +363,7 @@ impl App {
         }
     }
 
-    fn handle_switcher_key(&mut self, key: KeyEvent) {
+    async fn handle_switcher_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.overlay = Overlay::None;
@@ -378,16 +371,12 @@ impl App {
             KeyCode::Enter => {
                 let filtered = self.filtered_rooms();
                 if let Some(room) = filtered.get(self.switcher_selected) {
-                    self.active_room = Some(room.id.clone());
-                    self.active_account_id = Some(room.account_id.clone());
-                    self.messages.clear();
-                    self.scroll_offset = 0;
-                    self.focus = Focus::Chat;
-                    self.overlay = Overlay::None;
                     // Update selected_room to match
                     if let Some(idx) = self.all_rooms.iter().position(|r| r.id == room.id) {
                         self.selected_room = idx;
                     }
+                    self.overlay = Overlay::None;
+                    self.open_selected_room().await;
                 }
             }
             KeyCode::Up => {
@@ -496,6 +485,39 @@ impl App {
                 .cmp(&a.unread)
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
+    }
+
+    async fn open_selected_room(&mut self) {
+        if let Some(room) = self.all_rooms.get(self.selected_room) {
+            let room_id = room.id.clone();
+            let account_id = room.account_id.clone();
+            let room_name = room.name.clone();
+
+            self.active_room = Some(room_id.clone());
+            self.active_account_id = Some(account_id.clone());
+            self.messages.clear();
+            self.scroll_offset = 0;
+            self.focus = Focus::Chat;
+            self.status_msg = format!("Loading {}...", room_name);
+
+            // Fetch history
+            if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+                match account.fetch_history(&room_id, 50).await {
+                    Ok(msgs) => {
+                        self.messages = msgs;
+                        self.status_msg = format!(
+                            "{} — {} messages loaded",
+                            room_name,
+                            self.messages.len()
+                        );
+                    }
+                    Err(e) => {
+                        self.status_msg =
+                            format!("{} — history load failed: {}", room_name, e);
+                    }
+                }
+            }
+        }
     }
 
     pub fn filtered_rooms(&self) -> Vec<RoomInfo> {
