@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEvent};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
