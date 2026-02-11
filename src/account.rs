@@ -7,9 +7,10 @@ use matrix_sdk::{
     ruma::{
         OwnedRoomId, OwnedUserId, UserId,
         events::{
-            AnyMessageLikeEvent, AnyTimelineEvent,
+            AnySyncMessageLikeEvent, AnySyncTimelineEvent,
             room::message::{
                 MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+                SyncRoomMessageEvent,
             },
         },
     },
@@ -225,31 +226,27 @@ impl Account {
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
 
         let options = MessagesOptions::backward().from(
-            room.last_prev_batch_token().await?,
+            room.last_prev_batch().await?,
         );
 
         let response = room.messages(options).await?;
         let mut messages = Vec::new();
 
-        for event in &response.chunk {
-            let event = match event.event.deserialize() {
-                Ok(AnyTimelineEvent::MessageLike(
-                    AnyMessageLikeEvent::RoomMessage(msg),
-                )) => msg,
-                _ => continue,
+        for timeline_event in &response.chunk {
+            let Ok(event) = timeline_event.raw().deserialize() else {
+                continue;
             };
-
-            match event {
-                matrix_sdk::ruma::events::room::message::RoomMessageEvent::Original(original) => {
-                    if let MessageType::Text(text) = &original.content.msgtype {
-                        messages.push(crate::app::DisplayMessage {
-                            sender: original.sender.to_string(),
-                            body: text.body.clone(),
-                            timestamp: original.origin_server_ts.as_secs().into(),
-                        });
-                    }
+            if let AnySyncTimelineEvent::MessageLike(
+                AnySyncMessageLikeEvent::RoomMessage(SyncRoomMessageEvent::Original(original)),
+            ) = event
+            {
+                if let MessageType::Text(text) = &original.content.msgtype {
+                    messages.push(crate::app::DisplayMessage {
+                        sender: original.sender.to_string(),
+                        body: text.body.clone(),
+                        timestamp: original.origin_server_ts.as_secs().into(),
+                    });
                 }
-                _ => {}
             }
         }
 
