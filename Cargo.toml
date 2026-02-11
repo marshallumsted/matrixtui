@@ -23,6 +23,7 @@ serde_json = "1"
 
 # Misc
 anyhow = "1"
+mime = "0.3"
 dirs = "6"
 tracing = "0.1"
 tracing-subscriber = "0.3"

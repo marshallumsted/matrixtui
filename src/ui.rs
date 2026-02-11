@@ -128,6 +128,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::Help => draw_help_overlay(f, &app.theme),
         Overlay::RoomSwitcher => draw_switcher_overlay(f, app),
         Overlay::Settings => draw_settings_overlay(f, app),
+        Overlay::ProfileEditor => draw_profile_overlay(f, app),
+        Overlay::RoomCreator => draw_creator_overlay(f, app),
+        Overlay::RoomEditor => draw_editor_overlay(f, app),
         Overlay::None => {}
     }
 }
@@ -547,7 +550,7 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
 }
 
 fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
-    let area = centered_rect(60, 24, f.area());
+    let area = centered_rect(60, 26, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -568,6 +571,8 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         "    Ctrl+Q           Quit",
         "    a                Add account",
         "    s                Settings / themes",
+        "    n                New room",
+        "    e                Edit active room",
         "    ?                Toggle this help",
         "",
         "  Rooms:",
@@ -752,7 +757,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
 
             // Action menu for this account
             if is_action_target {
-                let actions = ["Reconnect", "Remove Account"];
+                let actions = ["Reconnect", "Remove Account", "Edit Profile"];
                 for (j, action) in actions.iter().enumerate() {
                     let is_action_sel = app.settings_account_action_selected == j;
                     let action_prefix = if is_action_sel {
@@ -892,6 +897,352 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
+}
+
+fn draw_profile_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = centered_rect(50, 18, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Edit Profile ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let fields = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(1), // user id
+            Constraint::Length(1), // current name
+            Constraint::Length(1), // current avatar
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // display name field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // avatar url field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // avatar path field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // error/hint
+        ])
+        .split(inner);
+
+    let acct_label = if app.profile_account_idx < app.accounts.len() {
+        app.accounts[app.profile_account_idx].user_id.as_str()
+    } else {
+        ""
+    };
+    f.render_widget(
+        Paragraph::new(format!("  {}", acct_label)).style(Style::default().fg(theme.accent)),
+        fields[0],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  Name: {}", app.profile_current_name))
+            .style(Style::default().fg(theme.text_dim)),
+        fields[1],
+    );
+    let avatar_display = if app.profile_current_avatar.len() > 40 {
+        format!("{}...", &app.profile_current_avatar[..37])
+    } else {
+        app.profile_current_avatar.clone()
+    };
+    f.render_widget(
+        Paragraph::new(format!("  Avatar: {}", avatar_display))
+            .style(Style::default().fg(theme.text_dim)),
+        fields[2],
+    );
+
+    let s0 = field_style(app.profile_focus == 0, theme);
+    let s1 = field_style(app.profile_focus == 1, theme);
+    let s2 = field_style(app.profile_focus == 2, theme);
+
+    f.render_widget(
+        Paragraph::new("  Display Name:").style(Style::default().fg(theme.text_dim)),
+        fields[4],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.profile_display_name)).style(s0),
+        fields[5],
+    );
+    f.render_widget(
+        Paragraph::new("  Avatar MXC URL:").style(Style::default().fg(theme.text_dim)),
+        fields[7],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.profile_avatar_url)).style(s1),
+        fields[8],
+    );
+    f.render_widget(
+        Paragraph::new("  Upload Avatar (file path):").style(Style::default().fg(theme.text_dim)),
+        fields[10],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.profile_avatar_path)).style(s2),
+        fields[11],
+    );
+
+    let hint = if let Some(err) = &app.profile_error {
+        Paragraph::new(format!("  {}", err)).style(Style::default().fg(theme.status_err))
+    } else if app.profile_busy {
+        Paragraph::new("  Working...").style(Style::default().fg(theme.status_warn))
+    } else {
+        Paragraph::new("  Tab: next   Enter: apply field   Esc: back")
+            .style(Style::default().fg(theme.dimmed))
+    };
+    f.render_widget(hint, fields[13]);
+
+    if !app.profile_busy {
+        let (row, col) = match app.profile_focus {
+            0 => (fields[5].y, fields[5].x + 2 + app.profile_display_name.len() as u16),
+            1 => (fields[8].y, fields[8].x + 2 + app.profile_avatar_url.len() as u16),
+            2 => (fields[11].y, fields[11].x + 2 + app.profile_avatar_path.len() as u16),
+            _ => (0, 0),
+        };
+        f.set_cursor_position((col, row));
+    }
+}
+
+fn draw_creator_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = centered_rect(50, 18, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" New Room ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let fields = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(1), // label
+            Constraint::Length(1), // name field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // topic field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // visibility
+            Constraint::Length(1), // encryption
+            Constraint::Length(1), // federated
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // invite field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // error/hint
+        ])
+        .split(inner);
+
+    let s0 = field_style(app.creator_focus == 0, theme);
+    let s1 = field_style(app.creator_focus == 1, theme);
+    let s5 = field_style(app.creator_focus == 5, theme);
+
+    f.render_widget(
+        Paragraph::new("  Name:").style(Style::default().fg(theme.text_dim)),
+        fields[0],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.creator_name)).style(s0),
+        fields[1],
+    );
+    f.render_widget(
+        Paragraph::new("  Topic:").style(Style::default().fg(theme.text_dim)),
+        fields[3],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.creator_topic)).style(s1),
+        fields[4],
+    );
+
+    let vis_label = if app.creator_visibility == 1 { "Public" } else { "Private" };
+    let vis_style = if app.creator_focus == 2 {
+        Style::default().fg(theme.text).bg(theme.highlight_bg)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+    f.render_widget(
+        Paragraph::new(format!("  Visibility:   [{}]", vis_label)).style(vis_style),
+        fields[6],
+    );
+
+    let e2ee_label = if app.creator_e2ee { "On" } else { "Off" };
+    let e2ee_style = if app.creator_focus == 3 {
+        Style::default().fg(theme.text).bg(theme.highlight_bg)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+    f.render_widget(
+        Paragraph::new(format!("  Encryption:   [{}]", e2ee_label)).style(e2ee_style),
+        fields[7],
+    );
+
+    let fed_label = if app.creator_federated { "Yes" } else { "No" };
+    let fed_style = if app.creator_focus == 4 {
+        Style::default().fg(theme.text).bg(theme.highlight_bg)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+    f.render_widget(
+        Paragraph::new(format!("  Federated:    [{}]", fed_label)).style(fed_style),
+        fields[8],
+    );
+
+    f.render_widget(
+        Paragraph::new("  Invite (comma-separated):").style(Style::default().fg(theme.text_dim)),
+        fields[10],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.creator_invite)).style(s5),
+        fields[11],
+    );
+
+    let hint = if let Some(err) = &app.creator_error {
+        Paragraph::new(format!("  {}", err)).style(Style::default().fg(theme.status_err))
+    } else if app.creator_busy {
+        Paragraph::new("  Creating room...").style(Style::default().fg(theme.status_warn))
+    } else {
+        Paragraph::new("  Tab: next  Space: toggle  Enter: create  Esc: cancel")
+            .style(Style::default().fg(theme.dimmed))
+    };
+    f.render_widget(hint, fields[13]);
+
+    if !app.creator_busy {
+        let (row, col) = match app.creator_focus {
+            0 => (fields[1].y, fields[1].x + 2 + app.creator_name.len() as u16),
+            1 => (fields[4].y, fields[4].x + 2 + app.creator_topic.len() as u16),
+            5 => (fields[11].y, fields[11].x + 2 + app.creator_invite.len() as u16),
+            _ => return, // toggle fields — no cursor
+        };
+        f.set_cursor_position((col, row));
+    }
+}
+
+fn draw_editor_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = centered_rect(50, 17, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Edit Room ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let fields = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(1), // room header
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // name field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // topic field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // label
+            Constraint::Length(1), // invite field
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // leave button
+            Constraint::Length(1), // error/hint
+        ])
+        .split(inner);
+
+    // Room header
+    let room_name = app
+        .editor_room_id
+        .as_ref()
+        .and_then(|rid| app.all_rooms.iter().find(|r| &r.id == rid))
+        .map(|r| r.name.as_str())
+        .unwrap_or("?");
+    let via = app.editor_account_id.as_deref().unwrap_or("");
+    f.render_widget(
+        Paragraph::new(format!("  {} (via {})", room_name, via))
+            .style(Style::default().fg(theme.accent)),
+        fields[0],
+    );
+
+    let s0 = field_style(app.editor_focus == 0, theme);
+    let s1 = field_style(app.editor_focus == 1, theme);
+    let s2 = field_style(app.editor_focus == 2, theme);
+
+    f.render_widget(
+        Paragraph::new("  Room Name:").style(Style::default().fg(theme.text_dim)),
+        fields[2],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.editor_name)).style(s0),
+        fields[3],
+    );
+    f.render_widget(
+        Paragraph::new("  Topic:").style(Style::default().fg(theme.text_dim)),
+        fields[5],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.editor_topic)).style(s1),
+        fields[6],
+    );
+    f.render_widget(
+        Paragraph::new("  Invite User:").style(Style::default().fg(theme.text_dim)),
+        fields[8],
+    );
+    f.render_widget(
+        Paragraph::new(format!("  {}", app.editor_invite_user)).style(s2),
+        fields[9],
+    );
+
+    // Leave button
+    let leave_style = if app.editor_focus == 3 {
+        if app.editor_confirm_leave {
+            Style::default()
+                .fg(theme.status_err)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.status_err)
+                .bg(theme.highlight_bg)
+        }
+    } else {
+        Style::default().fg(theme.status_err)
+    };
+    let leave_text = if app.editor_confirm_leave {
+        "  [ Press Enter again to leave ]"
+    } else {
+        "  [ Leave Room ]"
+    };
+    f.render_widget(Paragraph::new(leave_text).style(leave_style), fields[11]);
+
+    let hint = if let Some(err) = &app.editor_error {
+        Paragraph::new(format!("  {}", err)).style(Style::default().fg(theme.status_err))
+    } else if app.editor_busy {
+        Paragraph::new("  Working...").style(Style::default().fg(theme.status_warn))
+    } else {
+        Paragraph::new("  Tab: next   Enter: apply/confirm   Esc: back")
+            .style(Style::default().fg(theme.dimmed))
+    };
+    f.render_widget(hint, fields[12]);
+
+    if !app.editor_busy {
+        let (row, col) = match app.editor_focus {
+            0 => (fields[3].y, fields[3].x + 2 + app.editor_name.len() as u16),
+            1 => (fields[6].y, fields[6].x + 2 + app.editor_topic.len() as u16),
+            2 => (fields[9].y, fields[9].x + 2 + app.editor_invite_user.len() as u16),
+            _ => return, // leave button — no cursor
+        };
+        f.set_cursor_position((col, row));
+    }
 }
 
 fn field_style(focused: bool, theme: &Theme) -> Style {

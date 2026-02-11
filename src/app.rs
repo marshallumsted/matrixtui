@@ -69,6 +69,9 @@ pub enum Overlay {
     Help,
     RoomSwitcher,
     Settings,
+    ProfileEditor,
+    RoomCreator,
+    RoomEditor,
 }
 
 /// A message stored for display
@@ -129,6 +132,39 @@ pub struct App {
     pub settings_sort_open: bool,
     pub settings_sort_selected: usize,
 
+    // Profile editor overlay state
+    pub profile_display_name: String,
+    pub profile_avatar_url: String,
+    pub profile_avatar_path: String,
+    pub profile_focus: usize,
+    pub profile_error: Option<String>,
+    pub profile_busy: bool,
+    pub profile_account_idx: usize,
+    pub profile_current_name: String,
+    pub profile_current_avatar: String,
+
+    // Room creator overlay state
+    pub creator_name: String,
+    pub creator_topic: String,
+    pub creator_visibility: usize,
+    pub creator_e2ee: bool,
+    pub creator_federated: bool,
+    pub creator_invite: String,
+    pub creator_focus: usize,
+    pub creator_error: Option<String>,
+    pub creator_busy: bool,
+
+    // Room editor overlay state
+    pub editor_name: String,
+    pub editor_topic: String,
+    pub editor_invite_user: String,
+    pub editor_focus: usize,
+    pub editor_error: Option<String>,
+    pub editor_busy: bool,
+    pub editor_confirm_leave: bool,
+    pub editor_room_id: Option<OwnedRoomId>,
+    pub editor_account_id: Option<String>,
+
     // Active theme
     pub theme: ui::Theme,
 
@@ -183,6 +219,33 @@ impl App {
             favorites_count: 0,
             settings_sort_open: false,
             settings_sort_selected: 0,
+            profile_display_name: String::new(),
+            profile_avatar_url: String::new(),
+            profile_avatar_path: String::new(),
+            profile_focus: 0,
+            profile_error: None,
+            profile_busy: false,
+            profile_account_idx: 0,
+            profile_current_name: String::new(),
+            profile_current_avatar: String::new(),
+            creator_name: String::new(),
+            creator_topic: String::new(),
+            creator_visibility: 0,
+            creator_e2ee: true,
+            creator_federated: true,
+            creator_invite: String::new(),
+            creator_focus: 0,
+            creator_error: None,
+            creator_busy: false,
+            editor_name: String::new(),
+            editor_topic: String::new(),
+            editor_invite_user: String::new(),
+            editor_focus: 0,
+            editor_error: None,
+            editor_busy: false,
+            editor_confirm_leave: false,
+            editor_room_id: None,
+            editor_account_id: None,
             theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
@@ -270,13 +333,23 @@ impl App {
             _ => {}
         }
 
-        // 's' opens settings from any panel when no overlay is active
-        if self.overlay == Overlay::None
-            && self.focus != Focus::Input
-            && key.code == KeyCode::Char('s')
-        {
-            self.open_settings();
-            return;
+        // Global shortcuts when no overlay is active and not typing
+        if self.overlay == Overlay::None && self.focus != Focus::Input {
+            match key.code {
+                KeyCode::Char('s') => {
+                    self.open_settings();
+                    return;
+                }
+                KeyCode::Char('n') if !self.accounts.is_empty() => {
+                    self.open_room_creator();
+                    return;
+                }
+                KeyCode::Char('e') if self.active_room.is_some() => {
+                    self.open_room_editor().await;
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // Route to overlay or focused panel
@@ -289,6 +362,9 @@ impl App {
             }
             Overlay::RoomSwitcher => self.handle_switcher_key(key).await,
             Overlay::Settings => self.handle_settings_key(key).await,
+            Overlay::ProfileEditor => self.handle_profile_key(key).await,
+            Overlay::RoomCreator => self.handle_creator_key(key).await,
+            Overlay::RoomEditor => self.handle_editor_key(key).await,
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
@@ -402,6 +478,427 @@ impl App {
         let _ = self.config.save();
         self.selected_room += 1;
         self.refresh_rooms().await;
+    }
+
+    // --- Room Creator ---
+
+    fn open_room_creator(&mut self) {
+        self.overlay = Overlay::RoomCreator;
+        self.creator_name.clear();
+        self.creator_topic.clear();
+        self.creator_visibility = 0;
+        self.creator_e2ee = true;
+        self.creator_federated = true;
+        self.creator_invite.clear();
+        self.creator_focus = 0;
+        self.creator_error = None;
+        self.creator_busy = false;
+    }
+
+    async fn handle_creator_key(&mut self, key: KeyEvent) {
+        if self.creator_busy {
+            return;
+        }
+        match key.code {
+            KeyCode::Tab => {
+                self.creator_focus = (self.creator_focus + 1) % 6;
+            }
+            KeyCode::BackTab => {
+                self.creator_focus = if self.creator_focus == 0 { 5 } else { self.creator_focus - 1 };
+            }
+            KeyCode::Enter => {
+                match self.creator_focus {
+                    2 => self.creator_visibility = 1 - self.creator_visibility,
+                    3 => self.creator_e2ee = !self.creator_e2ee,
+                    4 => self.creator_federated = !self.creator_federated,
+                    _ => self.do_create_room().await,
+                }
+            }
+            KeyCode::Char(' ') if self.creator_focus == 2 => {
+                self.creator_visibility = 1 - self.creator_visibility;
+            }
+            KeyCode::Char(' ') if self.creator_focus == 3 => {
+                self.creator_e2ee = !self.creator_e2ee;
+            }
+            KeyCode::Char(' ') if self.creator_focus == 4 => {
+                self.creator_federated = !self.creator_federated;
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Char(c) => {
+                match self.creator_focus {
+                    0 => self.creator_name.push(c),
+                    1 => self.creator_topic.push(c),
+                    5 => self.creator_invite.push(c),
+                    _ => {}
+                }
+            }
+            KeyCode::Backspace => {
+                match self.creator_focus {
+                    0 => { self.creator_name.pop(); }
+                    1 => { self.creator_topic.pop(); }
+                    5 => { self.creator_invite.pop(); }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn do_create_room(&mut self) {
+        if self.creator_name.is_empty() {
+            self.creator_error = Some("Room name is required".to_string());
+            return;
+        }
+        let account_idx = self
+            .accounts
+            .iter()
+            .position(|a| Some(&a.user_id) == self.active_account_id.as_ref())
+            .unwrap_or(0);
+        if account_idx >= self.accounts.len() {
+            self.creator_error = Some("No account available".to_string());
+            return;
+        }
+
+        self.creator_busy = true;
+        self.creator_error = None;
+
+        let invite_ids: Vec<String> = self
+            .creator_invite
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let name = Some(self.creator_name.as_str());
+        let topic = if self.creator_topic.is_empty() {
+            None
+        } else {
+            Some(self.creator_topic.as_str())
+        };
+        let is_public = self.creator_visibility == 1;
+
+        match self.accounts[account_idx]
+            .create_room(name, topic, is_public, self.creator_e2ee, invite_ids)
+            .await
+        {
+            Ok(room_id) => {
+                self.status_msg = format!("Created room: {}", self.creator_name);
+                self.overlay = Overlay::None;
+                self.refresh_rooms().await;
+                if let Some(idx) = self.all_rooms.iter().position(|r| r.id == room_id) {
+                    self.selected_room = idx;
+                    self.open_selected_room().await;
+                }
+            }
+            Err(e) => {
+                self.creator_error = Some(e.to_string());
+            }
+        }
+        self.creator_busy = false;
+    }
+
+    // --- Room Editor ---
+
+    async fn open_room_editor(&mut self) {
+        if let (Some(room_id), Some(account_id)) =
+            (self.active_room.clone(), self.active_account_id.clone())
+        {
+            let current_name = self
+                .all_rooms
+                .iter()
+                .find(|r| r.id == room_id)
+                .map(|r| r.name.clone())
+                .unwrap_or_default();
+            let current_topic = self
+                .accounts
+                .iter()
+                .find(|a| a.user_id == account_id)
+                .and_then(|acct| acct.get_room_topic(&room_id))
+                .unwrap_or_default();
+
+            self.overlay = Overlay::RoomEditor;
+            self.editor_name = current_name;
+            self.editor_topic = current_topic;
+            self.editor_invite_user.clear();
+            self.editor_focus = 0;
+            self.editor_error = None;
+            self.editor_busy = false;
+            self.editor_confirm_leave = false;
+            self.editor_room_id = Some(room_id);
+            self.editor_account_id = Some(account_id);
+        }
+    }
+
+    async fn handle_editor_key(&mut self, key: KeyEvent) {
+        if self.editor_busy {
+            return;
+        }
+        match key.code {
+            KeyCode::Tab => {
+                self.editor_focus = (self.editor_focus + 1) % 4;
+                self.editor_confirm_leave = false;
+            }
+            KeyCode::BackTab => {
+                self.editor_focus = if self.editor_focus == 0 { 3 } else { self.editor_focus - 1 };
+                self.editor_confirm_leave = false;
+            }
+            KeyCode::Enter => {
+                match self.editor_focus {
+                    0 => self.do_edit_room_name().await,
+                    1 => self.do_edit_room_topic().await,
+                    2 => self.do_invite_user().await,
+                    3 => {
+                        if self.editor_confirm_leave {
+                            self.do_leave_room().await;
+                        } else {
+                            self.editor_confirm_leave = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Esc => {
+                if self.editor_confirm_leave {
+                    self.editor_confirm_leave = false;
+                } else {
+                    self.overlay = Overlay::None;
+                }
+            }
+            KeyCode::Char(c) => {
+                self.editor_confirm_leave = false;
+                match self.editor_focus {
+                    0 => self.editor_name.push(c),
+                    1 => self.editor_topic.push(c),
+                    2 => self.editor_invite_user.push(c),
+                    _ => {}
+                }
+            }
+            KeyCode::Backspace => {
+                self.editor_confirm_leave = false;
+                match self.editor_focus {
+                    0 => { self.editor_name.pop(); }
+                    1 => { self.editor_topic.pop(); }
+                    2 => { self.editor_invite_user.pop(); }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn do_edit_room_name(&mut self) {
+        let (room_id, account_id) = match (&self.editor_room_id, &self.editor_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+        if self.editor_name.is_empty() {
+            self.editor_error = Some("Name cannot be empty".to_string());
+            return;
+        }
+        self.editor_busy = true;
+        self.editor_error = None;
+        if let Some(acct) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match acct.set_room_name(&room_id, &self.editor_name).await {
+                Ok(()) => {
+                    self.status_msg = "Room name updated".to_string();
+                    self.refresh_rooms().await;
+                }
+                Err(e) => self.editor_error = Some(e.to_string()),
+            }
+        }
+        self.editor_busy = false;
+    }
+
+    async fn do_edit_room_topic(&mut self) {
+        let (room_id, account_id) = match (&self.editor_room_id, &self.editor_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+        self.editor_busy = true;
+        self.editor_error = None;
+        if let Some(acct) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match acct.set_room_topic(&room_id, &self.editor_topic).await {
+                Ok(()) => self.status_msg = "Room topic updated".to_string(),
+                Err(e) => self.editor_error = Some(e.to_string()),
+            }
+        }
+        self.editor_busy = false;
+    }
+
+    async fn do_invite_user(&mut self) {
+        let (room_id, account_id) = match (&self.editor_room_id, &self.editor_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+        if self.editor_invite_user.trim().is_empty() {
+            self.editor_error = Some("Enter a user ID".to_string());
+            return;
+        }
+        self.editor_busy = true;
+        self.editor_error = None;
+        if let Some(acct) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match acct.invite_user(&room_id, self.editor_invite_user.trim()).await {
+                Ok(()) => {
+                    self.status_msg = format!("Invited {}", self.editor_invite_user.trim());
+                    self.editor_invite_user.clear();
+                }
+                Err(e) => self.editor_error = Some(e.to_string()),
+            }
+        }
+        self.editor_busy = false;
+    }
+
+    async fn do_leave_room(&mut self) {
+        let (room_id, account_id) = match (&self.editor_room_id, &self.editor_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+        self.editor_busy = true;
+        self.editor_error = None;
+        if let Some(acct) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match acct.leave_room(&room_id).await {
+                Ok(()) => {
+                    self.status_msg = format!("Left room");
+                    self.active_room = None;
+                    self.active_account_id = None;
+                    self.messages.clear();
+                    self.overlay = Overlay::None;
+                    self.refresh_rooms().await;
+                }
+                Err(e) => self.editor_error = Some(e.to_string()),
+            }
+        }
+        self.editor_busy = false;
+    }
+
+    // --- Profile Editor ---
+
+    async fn open_profile_editor(&mut self, account_idx: usize) {
+        if account_idx >= self.accounts.len() {
+            return;
+        }
+        self.profile_account_idx = account_idx;
+        self.profile_busy = true;
+        self.overlay = Overlay::ProfileEditor;
+        self.profile_focus = 0;
+        self.profile_error = None;
+        self.profile_avatar_url.clear();
+        self.profile_avatar_path.clear();
+
+        let acct = &self.accounts[account_idx];
+        self.profile_current_name = acct
+            .get_display_name()
+            .await
+            .unwrap_or(None)
+            .unwrap_or_else(|| "(not set)".to_string());
+        self.profile_current_avatar = acct
+            .get_avatar_url()
+            .await
+            .unwrap_or(None)
+            .unwrap_or_else(|| "(not set)".to_string());
+
+        self.profile_display_name = if self.profile_current_name == "(not set)" {
+            String::new()
+        } else {
+            self.profile_current_name.clone()
+        };
+        self.profile_busy = false;
+    }
+
+    async fn handle_profile_key(&mut self, key: KeyEvent) {
+        if self.profile_busy {
+            return;
+        }
+        match key.code {
+            KeyCode::Tab => {
+                self.profile_focus = (self.profile_focus + 1) % 3;
+            }
+            KeyCode::BackTab => {
+                self.profile_focus = if self.profile_focus == 0 { 2 } else { self.profile_focus - 1 };
+            }
+            KeyCode::Enter => {
+                match self.profile_focus {
+                    0 => self.do_set_display_name().await,
+                    1 => self.do_set_avatar_url().await,
+                    2 => self.do_upload_avatar().await,
+                    _ => {}
+                }
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Char(c) => {
+                match self.profile_focus {
+                    0 => self.profile_display_name.push(c),
+                    1 => self.profile_avatar_url.push(c),
+                    2 => self.profile_avatar_path.push(c),
+                    _ => {}
+                }
+            }
+            KeyCode::Backspace => {
+                match self.profile_focus {
+                    0 => { self.profile_display_name.pop(); }
+                    1 => { self.profile_avatar_url.pop(); }
+                    2 => { self.profile_avatar_path.pop(); }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn do_set_display_name(&mut self) {
+        let idx = self.profile_account_idx;
+        if idx >= self.accounts.len() || self.profile_display_name.is_empty() {
+            return;
+        }
+        self.profile_busy = true;
+        self.profile_error = None;
+        match self.accounts[idx].set_display_name(&self.profile_display_name).await {
+            Ok(()) => {
+                self.profile_current_name = self.profile_display_name.clone();
+                self.accounts[idx].display_name = self.profile_display_name.clone();
+                self.status_msg = "Display name updated".to_string();
+            }
+            Err(e) => self.profile_error = Some(e.to_string()),
+        }
+        self.profile_busy = false;
+    }
+
+    async fn do_set_avatar_url(&mut self) {
+        let idx = self.profile_account_idx;
+        if idx >= self.accounts.len() || self.profile_avatar_url.is_empty() {
+            return;
+        }
+        self.profile_busy = true;
+        self.profile_error = None;
+        match self.accounts[idx].set_avatar_url(&self.profile_avatar_url).await {
+            Ok(()) => {
+                self.profile_current_avatar = self.profile_avatar_url.clone();
+                self.status_msg = "Avatar URL updated".to_string();
+            }
+            Err(e) => self.profile_error = Some(e.to_string()),
+        }
+        self.profile_busy = false;
+    }
+
+    async fn do_upload_avatar(&mut self) {
+        let idx = self.profile_account_idx;
+        if idx >= self.accounts.len() || self.profile_avatar_path.is_empty() {
+            return;
+        }
+        self.profile_busy = true;
+        self.profile_error = None;
+        match self.accounts[idx].upload_avatar(&self.profile_avatar_path).await {
+            Ok(mxc_url) => {
+                self.profile_current_avatar = mxc_url;
+                self.status_msg = "Avatar uploaded".to_string();
+            }
+            Err(e) => self.profile_error = Some(e.to_string()),
+        }
+        self.profile_busy = false;
     }
 
     fn handle_chat_key(&mut self, key: KeyEvent) {
@@ -582,7 +1079,7 @@ impl App {
             }
             KeyCode::Down => {
                 if self.settings_account_action_open {
-                    if self.settings_account_action_selected < 1 {
+                    if self.settings_account_action_selected < 2 {
                         self.settings_account_action_selected += 1;
                     }
                 } else if self.settings_accounts_open {
@@ -621,6 +1118,11 @@ impl App {
                             if self.settings_accounts_selected >= count {
                                 self.settings_accounts_selected = count.saturating_sub(1);
                             }
+                        }
+                        2 => {
+                            // Edit Profile
+                            self.settings_account_action_open = false;
+                            self.open_profile_editor(acct_idx).await;
                         }
                         _ => {}
                     }

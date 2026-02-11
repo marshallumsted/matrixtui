@@ -313,6 +313,147 @@ impl Account {
         info!("Send OK");
         Ok(())
     }
+
+    /// Get current display name from the server
+    pub async fn get_display_name(&self) -> Result<Option<String>> {
+        let name = self.client.account().get_display_name().await?;
+        Ok(name)
+    }
+
+    /// Set display name
+    pub async fn set_display_name(&self, name: &str) -> Result<()> {
+        self.client.account().set_display_name(Some(name)).await?;
+        Ok(())
+    }
+
+    /// Get current avatar MXC URL
+    pub async fn get_avatar_url(&self) -> Result<Option<String>> {
+        let url = self.client.account().get_avatar_url().await?;
+        Ok(url.map(|u| u.to_string()))
+    }
+
+    /// Set avatar by MXC URL
+    pub async fn set_avatar_url(&self, mxc_url: &str) -> Result<()> {
+        use matrix_sdk::ruma::OwnedMxcUri;
+        let uri: OwnedMxcUri = mxc_url.into();
+        self.client.account().set_avatar_url(Some(&uri)).await?;
+        Ok(())
+    }
+
+    /// Upload avatar from local file path
+    pub async fn upload_avatar(&self, file_path: &str) -> Result<String> {
+        let path = std::path::Path::new(file_path);
+        let data = std::fs::read(path)?;
+        let mime = mime_from_extension(path.extension().and_then(|e| e.to_str()).unwrap_or(""));
+        let response = self.client.account().upload_avatar(&mime, data).await?;
+        Ok(response.to_string())
+    }
+
+    /// Create a room
+    pub async fn create_room(
+        &self,
+        name: Option<&str>,
+        topic: Option<&str>,
+        is_public: bool,
+        e2ee: bool,
+        invite_ids: Vec<String>,
+    ) -> Result<OwnedRoomId> {
+        use matrix_sdk::ruma::api::client::room::{
+            create_room::v3::{Request, RoomPreset},
+            Visibility,
+        };
+
+        let mut request = Request::new();
+        if let Some(n) = name {
+            request.name = Some(n.to_string());
+        }
+        if let Some(t) = topic {
+            request.topic = Some(t.to_string());
+        }
+        request.visibility = if is_public {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        request.preset = Some(if is_public {
+            RoomPreset::PublicChat
+        } else if e2ee {
+            RoomPreset::TrustedPrivateChat
+        } else {
+            RoomPreset::PrivateChat
+        });
+
+        let mut invites = Vec::new();
+        for id_str in &invite_ids {
+            let trimmed = id_str.trim();
+            if !trimmed.is_empty() {
+                let user_id = <&UserId>::try_from(trimmed)?.to_owned();
+                invites.push(user_id);
+            }
+        }
+        request.invite = invites;
+
+        let response = self.client.create_room(request).await?;
+        Ok(response.room_id().to_owned())
+    }
+
+    /// Set room name
+    pub async fn set_room_name(&self, room_id: &OwnedRoomId, name: &str) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        room.set_name(name.to_string()).await?;
+        Ok(())
+    }
+
+    /// Set room topic
+    pub async fn set_room_topic(&self, room_id: &OwnedRoomId, topic: &str) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        room.set_room_topic(topic).await?;
+        Ok(())
+    }
+
+    /// Invite a user to a room
+    pub async fn invite_user(&self, room_id: &OwnedRoomId, user_id_str: &str) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let user_id = <&UserId>::try_from(user_id_str)?;
+        room.invite_user_by_id(user_id).await?;
+        Ok(())
+    }
+
+    /// Leave a room
+    pub async fn leave_room(&self, room_id: &OwnedRoomId) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        room.leave().await?;
+        Ok(())
+    }
+
+    /// Get room topic (from cached state)
+    pub fn get_room_topic(&self, room_id: &OwnedRoomId) -> Option<String> {
+        let room = self.client.get_room(room_id)?;
+        room.topic()
+    }
+}
+
+fn mime_from_extension(ext: &str) -> mime::Mime {
+    match ext.to_lowercase().as_str() {
+        "png" => "image/png".parse().unwrap(),
+        "jpg" | "jpeg" => "image/jpeg".parse().unwrap(),
+        "gif" => "image/gif".parse().unwrap(),
+        "webp" => "image/webp".parse().unwrap(),
+        "svg" => "image/svg+xml".parse().unwrap(),
+        _ => "application/octet-stream".parse().unwrap(),
+    }
 }
 
 fn normalize_homeserver(hs: &str) -> String {
