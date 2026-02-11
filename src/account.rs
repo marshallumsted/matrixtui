@@ -304,7 +304,7 @@ impl Account {
             .client
             .get_room(room_id)
             .ok_or_else(|| anyhow::anyhow!("Room not found for {}", self.user_id))?;
-        info!("Sending to {} via {} (encrypted: {})", room_id, self.user_id, room.is_encrypted().await.unwrap_or(false));
+        info!("Sending to {} via {}", room_id, self.user_id);
         let content = RoomMessageEventContent::text_plain(body);
         room.send(content).await?;
         info!("Send OK");
