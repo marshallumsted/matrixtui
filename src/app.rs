@@ -116,7 +116,9 @@ impl App {
     /// Restore all saved sessions on startup
     pub async fn restore_sessions(&mut self) {
         let saved = self.config.accounts.clone();
+        let mut errors = Vec::new();
         for sa in &saved {
+            self.status_msg = format!("Restoring {}...", sa.user_id);
             match Account::restore(sa).await {
                 Ok(mut account) => {
                     info!("Restored session for {}", account.user_id);
@@ -125,11 +127,14 @@ impl App {
                 }
                 Err(e) => {
                     error!("Failed to restore {}: {}", sa.user_id, e);
+                    errors.push(format!("{}: {}", sa.user_id, e));
                 }
             }
         }
         self.refresh_rooms().await;
-        if !self.accounts.is_empty() {
+        if !errors.is_empty() {
+            self.status_msg = format!("Restore failed: {}", errors.join("; "));
+        } else if !self.accounts.is_empty() {
             self.status_msg = format!("{} account(s) connected", self.accounts.len());
         }
     }
@@ -403,6 +408,15 @@ impl App {
     async fn do_login(&mut self) {
         self.login_busy = true;
         self.login_error = None;
+
+        // Check if already logged in to this homeserver with this username
+        let check_id = format!("@{}:{}", self.login_username, self.login_homeserver);
+        if self.accounts.iter().any(|a| a.user_id == check_id || a.user_id == self.login_username) {
+            self.login_error = Some("Already logged in to this account".to_string());
+            self.login_busy = false;
+            return;
+        }
+
         self.status_msg = format!("Logging in to {}...", self.login_homeserver);
 
         match Account::login(&self.login_homeserver, &self.login_username, &self.login_password).await {

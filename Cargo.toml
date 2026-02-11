@@ -12,6 +12,7 @@ crossterm = "0.28"
 
 # Matrix
 matrix-sdk = { version = "0.16", features = ["e2e-encryption", "sqlite"] }
+matrix-sdk-sqlite = { version = "0.16", features = ["bundled"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
