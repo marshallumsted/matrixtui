@@ -335,10 +335,22 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         " Chat ".to_string()
     };
 
+    // Calculate input box height based on wrapped text
+    let inner_width = (area.width as usize).saturating_sub(2); // borders
+    let input_lines = if inner_width == 0 {
+        1
+    } else {
+        let len = app.input.len();
+        if len == 0 { 1 } else { (len + inner_width - 1) / inner_width }
+    };
+    let max_input_lines = ((area.height as usize).saturating_sub(5)) / 2; // cap at half of chat area
+    let clamped_lines = input_lines.clamp(1, max_input_lines.max(1));
+    let input_height = (clamped_lines as u16) + 2; // +2 for borders
+
     // Split chat area: messages + input
     let chat_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .constraints([Constraint::Min(1), Constraint::Length(input_height)])
         .split(area);
 
     let msg_area = chat_layout[0];
@@ -400,14 +412,19 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         .border_style(input_style)
         .title(if input_focused { " > " } else { "" });
 
-    let input_text = Paragraph::new(app.input.as_str()).block(input_block);
+    let input_text = Paragraph::new(app.input.as_str())
+        .block(input_block)
+        .wrap(Wrap { trim: false });
     f.render_widget(input_text, input_area);
 
-    // Show cursor in input
+    // Show cursor in input (accounting for wrap)
     if input_focused {
+        let iw = inner_width.max(1);
+        let cursor_row = app.cursor_pos / iw;
+        let cursor_col = app.cursor_pos % iw;
         f.set_cursor_position((
-            input_area.x + 1 + app.cursor_pos as u16,
-            input_area.y + 1,
+            input_area.x + 1 + cursor_col as u16,
+            input_area.y + 1 + cursor_row as u16,
         ));
     }
 }
