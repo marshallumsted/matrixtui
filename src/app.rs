@@ -55,6 +55,7 @@ pub struct App {
     pub messages: Vec<DisplayMessage>,
     pub scroll_offset: usize,
     pub room_messages: HashMap<OwnedRoomId, Vec<DisplayMessage>>,
+    pending_echoes: Vec<String>,
 
     // Input state
     pub input: String,
@@ -99,6 +100,7 @@ impl App {
             messages: Vec::new(),
             scroll_offset: 0,
             room_messages: HashMap::new(),
+            pending_echoes: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
             login_homeserver: String::new(),
@@ -471,6 +473,7 @@ impl App {
                         .entry(room_id)
                         .or_default()
                         .push(msg);
+                    self.pending_echoes.push(body.to_string());
                     self.scroll_offset = 0;
                 }
                 Err(e) => {
@@ -488,6 +491,15 @@ impl App {
                 body,
                 timestamp,
             } => {
+                // Skip if this is our own message echoed back from sync
+                if let Some(pos) = self.pending_echoes.iter().position(|b| *b == body) {
+                    let is_own = self.accounts.iter().any(|a| a.user_id == sender.as_str());
+                    if is_own {
+                        self.pending_echoes.remove(pos);
+                        return;
+                    }
+                }
+
                 let msg = DisplayMessage {
                     sender: sender.to_string(),
                     body,
