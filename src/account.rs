@@ -156,17 +156,25 @@ impl Account {
                     let tx = tx_msg.clone();
                     let aid = aid.clone();
                     async move {
-                        if let MessageType::Text(text) = &event.content.msgtype {
-                            let _ = tx.send(MatrixEvent::Message {
-                                room_id: room.room_id().to_owned(),
-                                sender: event.sender,
-                                body: text.body.clone(),
-                                timestamp: event
-                                    .origin_server_ts
-                                    .as_secs()
-                                    .into(),
-                            });
-                        }
+                        let body = match &event.content.msgtype {
+                            MessageType::Text(text) => text.body.clone(),
+                            MessageType::Image(_) => "[image]".to_string(),
+                            MessageType::File(f) => format!("[file: {}]", f.filename()),
+                            MessageType::Video(_) => "[video]".to_string(),
+                            MessageType::Audio(_) => "[audio]".to_string(),
+                            MessageType::Notice(n) => n.body.clone(),
+                            MessageType::Emote(e) => format!("* {}", e.body),
+                            _ => "[unsupported message type]".to_string(),
+                        };
+                        let _ = tx.send(MatrixEvent::Message {
+                            room_id: room.room_id().to_owned(),
+                            sender: event.sender,
+                            body,
+                            timestamp: event
+                                .origin_server_ts
+                                .as_secs()
+                                .into(),
+                        });
                         let _ = tx.send(MatrixEvent::RoomsUpdated { account_id: aid });
                     }
                 },
@@ -233,18 +241,34 @@ impl Account {
         let mut messages = Vec::new();
 
         for timeline_event in &response.chunk {
-            let Ok(event) = timeline_event.raw().deserialize() else {
-                continue;
-            };
-            if let AnySyncTimelineEvent::MessageLike(
-                AnySyncMessageLikeEvent::RoomMessage(SyncRoomMessageEvent::Original(original)),
-            ) = event
-            {
-                if let MessageType::Text(text) = &original.content.msgtype {
+            match timeline_event.raw().deserialize() {
+                Ok(AnySyncTimelineEvent::MessageLike(
+                    AnySyncMessageLikeEvent::RoomMessage(SyncRoomMessageEvent::Original(original)),
+                )) => {
+                    let body = match &original.content.msgtype {
+                        MessageType::Text(text) => text.body.clone(),
+                        MessageType::Image(_) => "[image]".to_string(),
+                        MessageType::File(f) => format!("[file: {}]", f.filename()),
+                        MessageType::Video(_) => "[video]".to_string(),
+                        MessageType::Audio(_) => "[audio]".to_string(),
+                        MessageType::Notice(n) => n.body.clone(),
+                        MessageType::Emote(e) => format!("* {}", e.body),
+                        _ => "[unsupported message type]".to_string(),
+                    };
                     messages.push(crate::app::DisplayMessage {
                         sender: original.sender.to_string(),
-                        body: text.body.clone(),
+                        body,
                         timestamp: original.origin_server_ts.as_secs().into(),
+                    });
+                }
+                Ok(_) => {} // state events, reactions, etc — skip
+                Err(e) => {
+                    // Likely an encrypted message that couldn't be decrypted
+                    info!("Failed to deserialize event: {}", e);
+                    messages.push(crate::app::DisplayMessage {
+                        sender: "".to_string(),
+                        body: "[encrypted message — unable to decrypt]".to_string(),
+                        timestamp: 0,
                     });
                 }
             }

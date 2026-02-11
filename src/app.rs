@@ -452,8 +452,22 @@ impl App {
         };
 
         if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
-            if let Err(e) = account.send_message(&room_id, body).await {
-                self.status_msg = format!("Send failed: {}", e);
+            match account.send_message(&room_id, body).await {
+                Ok(_) => {
+                    // Local echo — show our own message immediately
+                    self.messages.push(DisplayMessage {
+                        sender: account.user_id.clone(),
+                        body: body.to_string(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    });
+                    self.scroll_offset = 0;
+                }
+                Err(e) => {
+                    self.status_msg = format!("Send failed: {}", e);
+                }
             }
         }
     }
