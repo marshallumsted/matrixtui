@@ -493,10 +493,20 @@ impl App {
                 self.refresh_rooms().await;
             }
             MatrixEvent::SyncComplete { account_id } => {
-                self.status_msg = format!("{}: synced", account_id);
+                // Track sync state per account
+                if let Some(acct) = self.accounts.iter_mut().find(|a| a.user_id == account_id) {
+                    acct.display_name = format!("{} (synced)", acct.homeserver);
+                }
+                let synced: Vec<_> = self.accounts.iter()
+                    .map(|a| format!("{}: OK", a.homeserver))
+                    .collect();
+                self.status_msg = synced.join(" | ");
                 self.refresh_rooms().await;
             }
             MatrixEvent::SyncError { account_id, error } => {
+                if let Some(acct) = self.accounts.iter_mut().find(|a| a.user_id == account_id) {
+                    acct.syncing = false;
+                }
                 self.status_msg = format!("{}: sync error — {}", account_id, error);
             }
         }
@@ -544,6 +554,13 @@ impl App {
                             format!("{} ({}) — history failed: {}", room_name, account_id, e);
                     }
                 }
+            } else {
+                self.status_msg = format!(
+                    "{} — account not found: {} (have: {})",
+                    room_name,
+                    account_id,
+                    self.accounts.iter().map(|a| a.user_id.as_str()).collect::<Vec<_>>().join(", ")
+                );
             }
         }
     }
