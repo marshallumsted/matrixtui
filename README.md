@@ -2,8 +2,6 @@
 
 Multi-account terminal Matrix client. Simultaneous connections to multiple homeservers in a single responsive TUI.
 
-**Design doc:** [`brain/Design Concepts/matrixtui.md`](../../Design%20Concepts/matrixtui.md)
-
 ## Install
 
 ### Prerequisites
@@ -17,21 +15,18 @@ sudo pacman -S base-devel rust git
 ```
 sudo apt install build-essential libssl-dev pkg-config git curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
 ```
 
 **Fedora:**
 ```
 sudo dnf install gcc openssl-devel pkg-config git
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
 ```
 
 **macOS:**
 ```
 xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
 ```
 
 **Termux (Android):**
@@ -39,13 +34,24 @@ source ~/.cargo/env
 pkg install rust git binutils
 ```
 
-### Build & Run
+> **Note:** Make sure `~/.cargo/bin` is in your PATH. If not, add it:
+> - **bash/zsh:** `echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc`
+> - **fish:** `fish_add_path ~/.cargo/bin`
+
+### Install
 
 ```
 git clone https://github.com/starlessoblivion/matrixtui.git
 cd matrixtui
-cargo build --release
-./target/release/matrixtui
+cargo install --path .
+```
+
+Then run `mtui` from anywhere.
+
+### Install from GitHub (no clone)
+
+```
+cargo install --git https://github.com/starlessoblivion/matrixtui.git
 ```
 
 ### Update
@@ -53,24 +59,37 @@ cargo build --release
 ```
 cd matrixtui
 git pull
-cargo build --release
+cargo install --path .
 ```
 
 ## Usage
 
-- `a` — add an account
-- `s` — settings / themes
-- `Tab` / arrow keys — navigate panels
-- `Enter` — select room / send message
-- `Ctrl+K` — quick room switcher
-- `?` — help
-- `Ctrl+Q` — quit
+| Key | Action |
+|-----|--------|
+| `a` | Add an account |
+| `s` | Settings / themes |
+| `n` | New room |
+| `e` | Edit active room |
+| `f` | Toggle favorite |
+| `Shift+Up/Down` | Reorder favorites |
+| `Tab` / arrow keys | Navigate panels |
+| `Enter` | Select room / send message |
+| `Ctrl+K` | Quick room switcher |
+| `?` | Help |
+| `Ctrl+Q` | Quit |
+
+## Config
+
+Data is stored in `~/.config/matrixtui/`:
+- `config.json` — accounts, theme, favorites, sort mode
+- `sessions/` — per-account SQLite stores (E2EE keys, sync state)
+- `matrixtui.log` — debug log
 
 ## Stack
 
 - **Language:** Rust
-- **TUI:** ratatui
-- **Matrix:** matrix-rust-sdk 0.16
+- **TUI:** ratatui 0.29
+- **Matrix:** matrix-rust-sdk 0.16 (E2EE, SQLite store)
 - **Async:** tokio
 
 ## Target Platforms
