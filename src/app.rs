@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::account::{Account, MatrixEvent, RoomInfo};
+use crate::account::{Account, MatrixEvent, RoomDetails, RoomInfo};
 use crate::config::Config;
 use crate::event::{AppEvent, spawn_input_reader, spawn_matrix_bridge};
 use crate::ui;
@@ -60,7 +60,6 @@ pub enum Focus {
     Rooms,
     Chat,
     Input,
-    LoginOverlay,
 }
 
 /// Which overlay is showing
@@ -77,6 +76,8 @@ pub enum Overlay {
     Recovery,
     MessageAction,
     SasVerify,
+    EmojiPicker,
+    RoomInfo,
 }
 
 /// State of the SAS verification overlay
@@ -97,6 +98,10 @@ pub struct DisplayMessage {
     pub sender: String,
     pub body: String,
     pub timestamp: u64,
+    pub reply_to_sender: Option<String>,
+    pub reply_to_body: Option<String>,
+    pub reply_to_event_id_raw: Option<String>,
+    pub reactions: Vec<(String, u16)>,
 }
 
 pub struct App {
@@ -118,6 +123,9 @@ pub struct App {
     pub room_messages: HashMap<OwnedRoomId, Vec<DisplayMessage>>,
     pending_echoes: Vec<String>,
     pub downloading_keys: bool,
+    pub first_unread_index: Option<usize>,
+    pub typing_users: Vec<String>,
+    pub replying_to: Option<(String, String, String)>, // (event_id, sender, body_snippet)
 
     // Input state
     pub input: String,
@@ -222,6 +230,13 @@ pub struct App {
     // Help overlay scroll
     pub help_scroll: usize,
 
+    // Emoji picker state
+    pub emoji_picker_selected: usize,
+    pub emoji_picker_event_id: Option<String>,
+
+    // Room info overlay state
+    pub room_details: Option<RoomDetails>,
+
     // Active theme
     pub theme: ui::Theme,
 
@@ -256,6 +271,9 @@ impl App {
             room_messages: HashMap::new(),
             pending_echoes: Vec::new(),
             downloading_keys: false,
+            first_unread_index: None,
+            typing_users: Vec::new(),
+            replying_to: None,
             input: String::new(),
             cursor_pos: 0,
             login_homeserver: String::new(),
@@ -327,6 +345,9 @@ impl App {
             sas_user_id: None,
             sas_handle: None,
             help_scroll: 0,
+            emoji_picker_selected: 0,
+            emoji_picker_event_id: None,
+            room_details: None,
             room_history_tokens: HashMap::new(),
             chat_viewport_msgs: Cell::new(10),
             theme,
@@ -381,7 +402,7 @@ impl App {
             if let Some(event) = app_rx.recv().await {
                 match event {
                     AppEvent::Key(key) => self.handle_key(key).await,
-                    AppEvent::Resize(_, _) => {} // ratatui handles this on next draw
+                    AppEvent::Resize => {} // ratatui handles this on next draw
                     AppEvent::Matrix(mev) => self.handle_matrix_event(mev).await,
                     AppEvent::Tick => {}
                 }
@@ -415,6 +436,19 @@ impl App {
                 self.switcher_selected = 0;
                 return;
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
+                if self.overlay == Overlay::None {
+                    if let Some(ref room_id) = self.active_room {
+                        if let Some(ref aid) = self.active_account_id {
+                            if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                                self.room_details = account.get_room_details(room_id);
+                                self.overlay = Overlay::RoomInfo;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -429,7 +463,7 @@ impl App {
                     self.open_room_creator();
                     return;
                 }
-                KeyCode::Char('e') if self.active_room.is_some() => {
+                KeyCode::Char('e') if self.active_room.is_some() && self.focus != Focus::Chat => {
                     self.open_room_editor().await;
                     return;
                 }
@@ -463,12 +497,17 @@ impl App {
             Overlay::Recovery => self.handle_recovery_key(key).await,
             Overlay::MessageAction => self.handle_message_action_key(key).await,
             Overlay::SasVerify => self.handle_sas_verify_key(key).await,
+            Overlay::EmojiPicker => self.handle_emoji_picker_key(key).await,
+            Overlay::RoomInfo => {
+                if key.code == KeyCode::Esc {
+                    self.overlay = Overlay::None;
+                }
+            }
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
                 Focus::Chat => self.handle_chat_key(key).await,
                 Focus::Input => self.handle_input_key(key).await,
-                Focus::LoginOverlay => {}
             },
         }
     }
@@ -1533,6 +1572,44 @@ impl App {
                 }
             }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
+            KeyCode::Char('r') => {
+                // Reply to selected message (auto-select last if none selected)
+                let idx = self.selected_message.or_else(|| {
+                    if !self.messages.is_empty() { Some(self.messages.len() - 1) } else { None }
+                });
+                if let Some(idx) = idx {
+                    if let Some(msg) = self.messages.get(idx) {
+                        if let Some(ref eid) = msg.event_id {
+                            let snippet = if msg.body.len() > 50 {
+                                format!("{}...", &msg.body[..50])
+                            } else {
+                                msg.body.clone()
+                            };
+                            self.replying_to = Some((
+                                eid.clone(),
+                                msg.sender.clone(),
+                                snippet,
+                            ));
+                            self.focus = Focus::Input;
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('e') => {
+                // React to selected message (auto-select last if none selected)
+                let idx = self.selected_message.or_else(|| {
+                    if !self.messages.is_empty() { Some(self.messages.len() - 1) } else { None }
+                });
+                if let Some(idx) = idx {
+                    if let Some(msg) = self.messages.get(idx) {
+                        if let Some(ref eid) = msg.event_id {
+                            self.emoji_picker_event_id = Some(eid.clone());
+                            self.emoji_picker_selected = 0;
+                            self.overlay = Overlay::EmojiPicker;
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1544,12 +1621,32 @@ impl App {
                     let msg = self.input.clone();
                     self.input.clear();
                     self.cursor_pos = 0;
-                    self.send_current_message(&msg).await;
+                    // Send typing=false
+                    if let (Some(ref room_id), Some(ref aid)) =
+                        (self.active_room.clone(), self.active_account_id.clone())
+                    {
+                        if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                            let _ = account.send_typing(room_id, false).await;
+                        }
+                    }
+                    if let Some((reply_eid, reply_sender, _)) = self.replying_to.take() {
+                        self.send_reply_message(&msg, &reply_eid, &reply_sender).await;
+                    } else {
+                        self.send_current_message(&msg).await;
+                    }
                 }
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
+                // Send typing notice
+                if let (Some(ref room_id), Some(ref aid)) =
+                    (self.active_room.clone(), self.active_account_id.clone())
+                {
+                    if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                        let _ = account.send_typing(room_id, true).await;
+                    }
+                }
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
@@ -1573,9 +1670,53 @@ impl App {
             KeyCode::Home => self.cursor_pos = 0,
             KeyCode::End => self.cursor_pos = self.input.len(),
             KeyCode::Esc => {
+                self.replying_to = None;
+                // Send typing=false
+                if let (Some(ref room_id), Some(ref aid)) =
+                    (self.active_room.clone(), self.active_account_id.clone())
+                {
+                    if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                        let _ = account.send_typing(room_id, false).await;
+                    }
+                }
                 self.focus = Focus::Chat;
             }
             KeyCode::Tab => self.focus = Focus::Rooms,
+            _ => {}
+        }
+    }
+
+    async fn handle_emoji_picker_key(&mut self, key: KeyEvent) {
+        const EMOJIS: &[&str] = &["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F62E}", "\u{1F622}", "\u{1F389}", "\u{1F525}", "\u{1F440}"];
+        match key.code {
+            KeyCode::Left => {
+                self.emoji_picker_selected = self.emoji_picker_selected.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                if self.emoji_picker_selected + 1 < EMOJIS.len() {
+                    self.emoji_picker_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(ref event_id) = self.emoji_picker_event_id.clone() {
+                    let emoji = EMOJIS[self.emoji_picker_selected];
+                    if let (Some(ref room_id), Some(ref aid)) =
+                        (self.active_room.clone(), self.active_account_id.clone())
+                    {
+                        if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                            if let Err(e) = account.send_reaction(room_id, event_id, emoji).await {
+                                self.status_msg = format!("Reaction failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                self.overlay = Overlay::None;
+                self.emoji_picker_event_id = None;
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                self.emoji_picker_event_id = None;
+            }
             _ => {}
         }
     }
@@ -1976,6 +2117,10 @@ impl App {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs(),
+                        reply_to_sender: None,
+                        reply_to_body: None,
+                        reply_to_event_id_raw: None,
+                        reactions: Vec::new(),
                     };
                     self.messages.push(msg.clone());
                     self.room_messages
@@ -1992,6 +2137,104 @@ impl App {
         }
     }
 
+    async fn send_reply_message(&mut self, body: &str, reply_to_event_id: &str, reply_to_sender: &str) {
+        let room_id = match &self.active_room {
+            Some(id) => id.clone(),
+            None => return,
+        };
+        let account_id = match &self.active_account_id {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match account.send_reply(&room_id, body, reply_to_event_id, reply_to_sender).await {
+                Ok(_) => {
+                    let msg = DisplayMessage {
+                        event_id: None,
+                        sender: account.user_id.clone(),
+                        body: body.to_string(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        reply_to_sender: Some(reply_to_sender.to_string()),
+                        reply_to_body: None,
+                        reply_to_event_id_raw: Some(reply_to_event_id.to_string()),
+                        reactions: Vec::new(),
+                    };
+                    self.messages.push(msg.clone());
+                    self.room_messages
+                        .entry(room_id)
+                        .or_default()
+                        .push(msg);
+                    self.pending_echoes.push(body.to_string());
+                    self.scroll_offset = 0;
+                }
+                Err(e) => {
+                    self.status_msg = format!("Reply failed: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Look up a message by event_id and return (sender, body_snippet)
+    fn resolve_reply_context(
+        &self,
+        room_id: &OwnedRoomId,
+        reply_event_id: &str,
+    ) -> (Option<String>, Option<String>) {
+        // Search active messages first
+        let found = self
+            .messages
+            .iter()
+            .find(|m| m.event_id.as_deref() == Some(reply_event_id))
+            .or_else(|| {
+                self.room_messages
+                    .get(room_id)
+                    .and_then(|msgs| {
+                        msgs.iter().find(|m| m.event_id.as_deref() == Some(reply_event_id))
+                    })
+            });
+        if let Some(orig) = found {
+            let snippet = if orig.body.len() > 50 {
+                format!("{}...", &orig.body[..50])
+            } else {
+                orig.body.clone()
+            };
+            (Some(orig.sender.clone()), Some(snippet))
+        } else {
+            (None, None)
+        }
+    }
+
+    /// Resolve reply context for all messages that have reply_to_event_id_raw set but no reply_to_sender
+    fn resolve_all_replies(messages: &mut [DisplayMessage]) {
+        // Build an index of event_id -> (sender, body) first
+        let index: HashMap<String, (String, String)> = messages
+            .iter()
+            .filter_map(|m| {
+                let eid = m.event_id.as_ref()?;
+                let snippet = if m.body.len() > 50 {
+                    format!("{}...", &m.body[..50])
+                } else {
+                    m.body.clone()
+                };
+                Some((eid.clone(), (m.sender.clone(), snippet)))
+            })
+            .collect();
+        for msg in messages.iter_mut() {
+            if msg.reply_to_sender.is_none() {
+                if let Some(ref reply_eid) = msg.reply_to_event_id_raw {
+                    if let Some((sender, body)) = index.get(reply_eid) {
+                        msg.reply_to_sender = Some(sender.clone());
+                        msg.reply_to_body = Some(body.clone());
+                    }
+                }
+            }
+        }
+    }
+
     async fn handle_matrix_event(&mut self, event: MatrixEvent) {
         match event {
             MatrixEvent::Message {
@@ -2000,6 +2243,7 @@ impl App {
                 body,
                 timestamp,
                 event_id,
+                reply_to_event_id,
             } => {
                 // Skip if this is our own message echoed back from sync
                 if let Some(pos) = self.pending_echoes.iter().position(|b| *b == body) {
@@ -2010,11 +2254,24 @@ impl App {
                     }
                 }
 
+                // Resolve reply context
+                let (reply_to_sender, reply_to_body) =
+                    if let Some(ref reply_eid) = reply_to_event_id {
+                        self.resolve_reply_context(&room_id, reply_eid)
+                    } else {
+                        (None, None)
+                    };
+
+                let receipt_eid = event_id.clone();
                 let msg = DisplayMessage {
                     event_id: Some(event_id),
                     sender: sender.to_string(),
                     body,
                     timestamp,
+                    reply_to_sender,
+                    reply_to_body,
+                    reply_to_event_id_raw: reply_to_event_id,
+                    reactions: Vec::new(),
                 };
 
                 // Always cache in per-room store
@@ -2026,9 +2283,52 @@ impl App {
                 // If this message is for the active room, add to display
                 if Some(&room_id) == self.active_room.as_ref() {
                     self.messages.push(msg);
+                    // Send read receipt for the active room
+                    if let Some(ref aid) = self.active_account_id {
+                        if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                            let _ = account.send_read_receipt(&room_id, &receipt_eid).await;
+                        }
+                    }
                 }
             }
-            MatrixEvent::RoomsUpdated { .. } => {
+            MatrixEvent::Typing { room_id, user_ids } => {
+                if Some(&room_id) == self.active_room.as_ref() {
+                    self.typing_users = user_ids
+                        .iter()
+                        .filter(|uid| !self.accounts.iter().any(|a| a.user_id == uid.as_str()))
+                        .map(|uid| {
+                            uid.localpart().to_string()
+                        })
+                        .collect();
+                }
+            }
+            MatrixEvent::Reaction { room_id, event_id, key } => {
+                // Update reactions in active messages
+                if Some(&room_id) == self.active_room.as_ref() {
+                    if let Some(msg) = self.messages.iter_mut().find(|m| {
+                        m.event_id.as_deref() == Some(&event_id)
+                    }) {
+                        if let Some(existing) = msg.reactions.iter_mut().find(|r| r.0 == key) {
+                            existing.1 += 1;
+                        } else {
+                            msg.reactions.push((key.clone(), 1));
+                        }
+                    }
+                }
+                // Also update in room_messages cache
+                if let Some(msgs) = self.room_messages.get_mut(&room_id) {
+                    if let Some(msg) = msgs.iter_mut().find(|m| {
+                        m.event_id.as_deref() == Some(&event_id)
+                    }) {
+                        if let Some(existing) = msg.reactions.iter_mut().find(|r| r.0 == key) {
+                            existing.1 += 1;
+                        } else {
+                            msg.reactions.push((key, 1));
+                        }
+                    }
+                }
+            }
+            MatrixEvent::RoomsUpdated => {
                 self.refresh_rooms().await;
             }
             MatrixEvent::SyncComplete { account_id } => {
@@ -2229,11 +2529,14 @@ impl App {
                 }
             }
 
+            let unread = room.unread;
             self.active_room = Some(room_id.clone());
             self.active_account_id = Some(account_id.clone());
             self.messages.clear();
             self.scroll_offset = 0;
             self.selected_message = None;
+            self.typing_users.clear();
+            self.replying_to = None;
             self.focus = Focus::Chat;
 
             let account_synced = self
@@ -2324,6 +2627,26 @@ impl App {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
+            }
+
+            // Resolve reply context for loaded messages
+            Self::resolve_all_replies(&mut self.messages);
+
+            // Set unread separator
+            if unread > 0 && !self.messages.is_empty() {
+                let idx = self.messages.len().saturating_sub(unread as usize);
+                self.first_unread_index = Some(idx);
+            } else {
+                self.first_unread_index = None;
+            }
+
+            // Send read receipt on the latest message
+            if let Some(last) = self.messages.last() {
+                if let Some(ref eid) = last.event_id {
+                    if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+                        let _ = account.send_read_receipt(&room_id, eid).await;
+                    }
+                }
             }
         }
     }

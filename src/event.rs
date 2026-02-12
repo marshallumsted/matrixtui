@@ -10,7 +10,7 @@ pub enum AppEvent {
     /// A key was pressed
     Key(KeyEvent),
     /// Terminal was resized
-    Resize(u16, u16),
+    Resize,
     /// A Matrix event from any account
     Matrix(MatrixEvent),
     /// Tick for periodic UI refresh
@@ -27,8 +27,8 @@ pub fn spawn_input_reader(tx: mpsc::UnboundedSender<AppEvent>) {
                     Ok(Event::Key(key)) => {
                         let _ = tx.send(AppEvent::Key(key));
                     }
-                    Ok(Event::Resize(w, h)) => {
-                        let _ = tx.send(AppEvent::Resize(w, h));
+                    Ok(Event::Resize(_, _)) => {
+                        let _ = tx.send(AppEvent::Resize);
                     }
                     _ => {}
                 }

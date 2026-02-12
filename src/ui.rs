@@ -134,6 +134,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::Recovery => draw_recovery_overlay(f, app),
         Overlay::MessageAction => draw_message_action_overlay(f, app),
         Overlay::SasVerify => draw_sas_verify_overlay(f, app),
+        Overlay::EmojiPicker => draw_emoji_picker_overlay(f, app),
+        Overlay::RoomInfo => draw_room_info_overlay(f, app),
         Overlay::None => {}
     }
 }
@@ -361,14 +363,22 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
     let clamped_lines = input_lines.clamp(1, max_input_lines.max(1));
     let input_height = (clamped_lines as u16) + 2; // +2 for borders
 
-    // Split chat area: messages + input
+    // Typing indicator height
+    let typing_height: u16 = if !app.typing_users.is_empty() { 1 } else { 0 };
+
+    // Split chat area: messages + typing + input
     let chat_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(input_height)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(typing_height),
+            Constraint::Length(input_height),
+        ])
         .split(area);
 
     let msg_area = chat_layout[0];
-    let input_area = chat_layout[1];
+    let typing_area = chat_layout[1];
+    let input_area = chat_layout[2];
 
     // Messages
     let msg_block = Block::default()
@@ -400,9 +410,26 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         let mut start = end;
         for i in (0..end).rev() {
             let msg = &app.messages[i];
-            let sender_text = format!("  {}", msg.sender);
-            let body_text = format!("  {}", msg.body);
+            let is_reply = msg.reply_to_sender.is_some();
+            let indent = if is_reply { "    " } else { "  " };
+            let sender_text = format!("{}{}", indent, msg.sender);
+            let body_text = format!("{}{}", indent, msg.body);
             let mut msg_h = wrapped_height(&sender_text) + wrapped_height(&body_text);
+            // Reply context line (may wrap)
+            if is_reply {
+                let reply_preview = format!("  \u{2514} {}: {}",
+                    msg.reply_to_sender.as_deref().unwrap_or(""),
+                    msg.reply_to_body.as_deref().unwrap_or(""));
+                msg_h += wrapped_height(&reply_preview);
+            }
+            // Reaction line
+            if !msg.reactions.is_empty() {
+                msg_h += 1;
+            }
+            // Unread separator
+            if app.first_unread_index == Some(i) {
+                msg_h += 1;
+            }
             // Separator line between messages (not after the last one)
             if i + 1 < end {
                 msg_h += 1;
@@ -442,12 +469,58 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default()
                 };
-                let sender_text = format!("  {}", msg.sender);
-                let body_text = format!("  {}", msg.body);
-                let mut lines = vec![
-                    Line::from(Span::styled(sender_text, sender_style)),
-                    Line::from(Span::styled(body_text, body_style)),
-                ];
+                let mut lines: Vec<Line> = Vec::new();
+
+                // Unread separator
+                if app.first_unread_index == Some(msg_idx) {
+                    let sep_width = inner_width.saturating_sub(4);
+                    let dashes = "\u{2500}".repeat(sep_width / 2);
+                    let sep_text = format!("{}  new  {}", dashes, dashes);
+                    lines.push(Line::from(Span::styled(
+                        sep_text,
+                        Style::default().fg(theme.status_warn),
+                    )));
+                }
+
+                // Reply context line + indented sender/body for replies
+                let is_reply = msg.reply_to_sender.is_some();
+                if let (Some(reply_sender), Some(reply_body)) =
+                    (&msg.reply_to_sender, &msg.reply_to_body)
+                {
+                    let reply_text = format!("  \u{2514} {}: {}", reply_sender, reply_body);
+                    lines.push(Line::from(Span::styled(
+                        reply_text,
+                        Style::default()
+                            .fg(theme.text_dim)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+
+                let indent = if is_reply { "    " } else { "  " };
+                let sender_text = format!("{}{}", indent, msg.sender);
+                let body_text = format!("{}{}", indent, msg.body);
+                lines.push(Line::from(Span::styled(sender_text, sender_style)));
+                lines.push(Line::from(Span::styled(body_text, body_style)));
+
+                // Reaction line
+                if !msg.reactions.is_empty() {
+                    let reaction_text: String = msg
+                        .reactions
+                        .iter()
+                        .map(|(emoji, count)| {
+                            if *count > 1 {
+                                format!("{} {} ", emoji, count)
+                            } else {
+                                format!("{} ", emoji)
+                            }
+                        })
+                        .collect();
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", reaction_text.trim_end()),
+                        Style::default().fg(theme.text_dim),
+                    )));
+                }
+
                 // Add separator after every message except the last
                 if i + 1 < msg_count {
                     lines.push(Line::from(""));
@@ -468,6 +541,22 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(messages, msg_area);
     }
 
+    // Typing indicator
+    if !app.typing_users.is_empty() {
+        let typing_text = if app.typing_users.len() == 1 {
+            format!("  {} is typing...", app.typing_users[0])
+        } else {
+            format!("  {} are typing...", app.typing_users.join(", "))
+        };
+        let typing = Paragraph::new(Span::styled(
+            typing_text,
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::ITALIC),
+        ));
+        f.render_widget(typing, typing_area);
+    }
+
     // Input box
     let input_focused = app.focus == Focus::Input;
     let input_style = if input_focused {
@@ -475,10 +564,18 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(theme.dimmed)
     };
+    let input_title = if let Some((_, ref sender, _)) = app.replying_to {
+        let short_name = sender.split(':').next().unwrap_or(sender);
+        format!(" Reply to {} (Esc cancel) ", short_name)
+    } else if input_focused {
+        " > ".to_string()
+    } else {
+        String::new()
+    };
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(input_style)
-        .title(if input_focused { " > " } else { "" });
+        .title(input_title);
 
     let input_text = Paragraph::new(app.input.as_str())
         .block(input_block)
@@ -655,6 +752,9 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         "  Chat:",
         "    Up/Down          Select / scroll messages",
         "    Enter            Message actions (edit/delete)",
+        "    r                Reply to selected message",
+        "    e                React to selected message",
+        "    Ctrl+I           Room info panel",
         "    Tab              Focus input box",
         "    Esc              Deselect / back to rooms",
         "    Home/End         Jump to oldest / newest",
@@ -2011,6 +2111,121 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             );
         }
     }
+}
+
+fn draw_emoji_picker_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    const EMOJIS: &[&str] = &[
+        "\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F62E}",
+        "\u{1F622}", "\u{1F389}", "\u{1F525}", "\u{1F440}",
+    ];
+    let term = f.area();
+    let height: u16 = 5;
+    let area = centered_rect(50, height, term);
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default()
+        .title(Span::styled(
+            " React ",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let emoji_spans: Vec<Span> = EMOJIS
+        .iter()
+        .enumerate()
+        .flat_map(|(i, emoji)| {
+            let style = if i == app.emoji_picker_selected {
+                Style::default().bg(theme.highlight_bg)
+            } else {
+                Style::default()
+            };
+            vec![
+                Span::styled(format!(" {} ", emoji), style),
+                Span::raw(" "),
+            ]
+        })
+        .collect();
+
+    let emoji_line = Line::from(emoji_spans);
+    let hint = Line::from(Span::styled(
+        "  \u{2190}/\u{2192}: select   Enter: send   Esc: cancel",
+        Style::default().fg(theme.text_dim),
+    ));
+
+    let content = Paragraph::new(vec![
+        Line::from(""),
+        emoji_line,
+        hint,
+    ]);
+    f.render_widget(content, inner);
+}
+
+fn draw_room_info_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let details = match &app.room_details {
+        Some(d) => d,
+        None => return,
+    };
+
+    let term = f.area();
+    let topic_lines: u16 = if let Some(ref topic) = details.topic {
+        let inner_w = (term.width * 60 / 100).saturating_sub(4) as usize;
+        if inner_w == 0 { 1 } else { ((topic.len().max(1) + inner_w - 1) / inner_w) as u16 }
+    } else {
+        0
+    };
+    let height = (9 + topic_lines).min(term.height);
+    let area = centered_rect(60, height, term);
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default()
+        .title(Span::styled(
+            " Room Info ",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  # {}", details.name),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("  {}", details.room_id),
+            Style::default().fg(theme.text_dim),
+        )),
+        Line::from(""),
+    ];
+
+    if let Some(ref topic) = details.topic {
+        lines.push(Line::from(Span::styled(
+            format!("  Topic: {}", topic),
+            Style::default().fg(theme.text),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("  Members: {}", details.member_count),
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  Encryption: {}", details.encryption),
+        Style::default().fg(theme.text),
+    )));
+
+    let content = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(content, inner);
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

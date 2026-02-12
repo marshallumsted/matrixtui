@@ -9,14 +9,20 @@ use matrix_sdk::{
     },
     room::MessagesOptions,
     ruma::{
-        OwnedRoomId, OwnedUserId, UInt, UserId,
+        OwnedEventId, OwnedRoomId, OwnedUserId, UInt, UserId,
+        api::client::receipt::create_receipt,
         events::{
-            AnySyncMessageLikeEvent, AnySyncTimelineEvent,
+            AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncEphemeralRoomEvent,
             key::verification::VerificationMethod,
+            reaction::OriginalSyncReactionEvent,
+            receipt::ReceiptThread,
+            relation::Annotation,
             room::message::{
-                MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
-                SyncRoomMessageEvent,
+                AddMentions, ForwardThread, MessageType, OriginalSyncRoomMessageEvent,
+                Relation, ReplyMetadata, RoomMessageEventContent,
+                RoomMessageEventContentWithoutRelation, SyncRoomMessageEvent,
             },
+            typing::TypingEventContent,
         },
     },
 };
@@ -28,6 +34,34 @@ use tracing::info;
 
 use crate::config::{SavedAccount, data_dir};
 
+/// Strip the Matrix reply fallback from a message body.
+/// Reply bodies look like: "> <@user:server> quoted text\n> more\n\nActual reply"
+/// This strips the leading `> ` lines and the blank line separator.
+fn strip_reply_fallback(body: &str) -> String {
+    let mut lines = body.lines().peekable();
+    // Skip lines starting with "> "
+    while let Some(line) = lines.peek() {
+        if line.starts_with("> ") {
+            lines.next();
+        } else {
+            break;
+        }
+    }
+    // Skip the blank separator line
+    if let Some(line) = lines.peek() {
+        if line.is_empty() {
+            lines.next();
+        }
+    }
+    let remaining: String = lines.collect::<Vec<_>>().join("\n");
+    if remaining.is_empty() {
+        // Fallback: return original if stripping removed everything
+        body.to_string()
+    } else {
+        remaining
+    }
+}
+
 /// Events pushed from Matrix sync to the UI
 #[derive(Debug, Clone)]
 pub enum MatrixEvent {
@@ -37,10 +71,18 @@ pub enum MatrixEvent {
         body: String,
         timestamp: u64,
         event_id: String,
+        reply_to_event_id: Option<String>,
     },
-    RoomsUpdated {
-        account_id: String,
+    Typing {
+        room_id: OwnedRoomId,
+        user_ids: Vec<OwnedUserId>,
     },
+    Reaction {
+        room_id: OwnedRoomId,
+        event_id: String,
+        key: String,
+    },
+    RoomsUpdated,
     SyncError {
         account_id: String,
         error: String,
@@ -82,6 +124,16 @@ pub struct RoomInfo {
     pub is_dm: bool,
     pub unread: u64,
     pub account_id: String,
+}
+
+/// Detailed room info for the Room Info overlay
+#[derive(Debug, Clone)]
+pub struct RoomDetails {
+    pub name: String,
+    pub topic: Option<String>,
+    pub member_count: u64,
+    pub encryption: String,
+    pub room_id: String,
 }
 
 /// A single logged-in Matrix account
@@ -196,11 +248,9 @@ impl Account {
 
             // Register message handler
             let tx_msg = tx.clone();
-            let aid = account_id.clone();
             client.add_event_handler(
                 move |event: OriginalSyncRoomMessageEvent, room: Room| {
                     let tx = tx_msg.clone();
-                    let aid = aid.clone();
                     async move {
                         let body = match &event.content.msgtype {
                             MessageType::Text(text) => text.body.clone(),
@@ -212,6 +262,18 @@ impl Account {
                             MessageType::Emote(e) => format!("* {}", e.body),
                             _ => "[unsupported message type]".to_string(),
                         };
+                        let reply_to_event_id = match &event.content.relates_to {
+                            Some(Relation::Reply { in_reply_to }) => {
+                                Some(in_reply_to.event_id.to_string())
+                            }
+                            _ => None,
+                        };
+                        // Strip reply fallback from body if this is a reply
+                        let body = if reply_to_event_id.is_some() {
+                            strip_reply_fallback(&body)
+                        } else {
+                            body
+                        };
                         let _ = tx.send(MatrixEvent::Message {
                             room_id: room.room_id().to_owned(),
                             sender: event.sender.clone(),
@@ -221,8 +283,38 @@ impl Account {
                                 .as_secs()
                                 .into(),
                             event_id: event.event_id.to_string(),
+                            reply_to_event_id,
                         });
-                        let _ = tx.send(MatrixEvent::RoomsUpdated { account_id: aid });
+                        let _ = tx.send(MatrixEvent::RoomsUpdated);
+                    }
+                },
+            );
+
+            // Register typing indicator handler
+            let tx_typing = tx.clone();
+            client.add_event_handler(
+                move |event: SyncEphemeralRoomEvent<TypingEventContent>, room: Room| {
+                    let tx = tx_typing.clone();
+                    async move {
+                        let _ = tx.send(MatrixEvent::Typing {
+                            room_id: room.room_id().to_owned(),
+                            user_ids: event.content.user_ids,
+                        });
+                    }
+                },
+            );
+
+            // Register reaction handler
+            let tx_react = tx.clone();
+            client.add_event_handler(
+                move |event: OriginalSyncReactionEvent, room: Room| {
+                    let tx = tx_react.clone();
+                    async move {
+                        let _ = tx.send(MatrixEvent::Reaction {
+                            room_id: room.room_id().to_owned(),
+                            event_id: event.content.relates_to.event_id.to_string(),
+                            key: event.content.relates_to.key,
+                        });
                     }
                 },
             );
@@ -346,11 +438,27 @@ impl Account {
                         MessageType::Emote(e) => format!("* {}", e.body),
                         _ => "[unsupported message type]".to_string(),
                     };
+                    let reply_to_event_id = match &original.content.relates_to {
+                        Some(Relation::Reply { in_reply_to }) => {
+                            Some(in_reply_to.event_id.to_string())
+                        }
+                        _ => None,
+                    };
+                    // Strip reply fallback from body if this is a reply
+                    let body = if reply_to_event_id.is_some() {
+                        strip_reply_fallback(&body)
+                    } else {
+                        body
+                    };
                     messages.push(crate::app::DisplayMessage {
                         sender: original.sender.to_string(),
                         body,
                         timestamp: original.origin_server_ts.as_secs().into(),
                         event_id: Some(original.event_id.to_string()),
+                        reply_to_sender: None, // resolved after all messages loaded
+                        reply_to_body: None,
+                        reactions: Vec::new(),
+                        reply_to_event_id_raw: reply_to_event_id,
                     });
                 }
                 Ok(_) => {} // state events, reactions, etc — skip
@@ -362,6 +470,10 @@ impl Account {
                         body: "[encrypted message — unable to decrypt]".to_string(),
                         timestamp: 0,
                         event_id: None,
+                        reply_to_sender: None,
+                        reply_to_body: None,
+                        reactions: Vec::new(),
+                        reply_to_event_id_raw: None,
                     });
                 }
             }
@@ -580,6 +692,103 @@ impl Account {
         Ok(())
     }
 
+    /// Send a reply to a message
+    pub async fn send_reply(
+        &self,
+        room_id: &OwnedRoomId,
+        body: &str,
+        reply_to_event_id: &str,
+        reply_to_sender: &str,
+    ) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let reply_eid: OwnedEventId = reply_to_event_id.parse()?;
+        let reply_uid: OwnedUserId = reply_to_sender.parse()?;
+        let metadata = ReplyMetadata::new(&reply_eid, &reply_uid, None);
+        let content = RoomMessageEventContentWithoutRelation::text_plain(body)
+            .make_reply_to(metadata, ForwardThread::Yes, AddMentions::Yes);
+        room.send(content).await?;
+        Ok(())
+    }
+
+    /// Send a reaction to a message
+    pub async fn send_reaction(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        use matrix_sdk::ruma::events::reaction::ReactionEventContent;
+
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let eid: OwnedEventId = event_id.parse()?;
+        let content = ReactionEventContent::new(Annotation::new(eid, emoji.to_string()));
+        room.send(content).await?;
+        Ok(())
+    }
+
+    /// Send a read receipt for a message
+    pub async fn send_read_receipt(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &str,
+    ) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let eid: OwnedEventId = event_id.parse()?;
+        room.send_single_receipt(
+            create_receipt::v3::ReceiptType::Read,
+            ReceiptThread::Unthreaded,
+            eid,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Send typing notification
+    pub async fn send_typing(
+        &self,
+        room_id: &OwnedRoomId,
+        typing: bool,
+    ) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        room.typing_notice(typing).await?;
+        Ok(())
+    }
+
+    /// Get detailed room info
+    pub fn get_room_details(&self, room_id: &OwnedRoomId) -> Option<RoomDetails> {
+        let room = self.client.get_room(room_id)?;
+        let name = room
+            .cached_display_name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| room.room_id().to_string());
+        let topic = room.topic();
+        let member_count = room.joined_members_count();
+        let encryption = if room.encryption_state().is_encrypted() {
+            "Encrypted".to_string()
+        } else {
+            "Not encrypted".to_string()
+        };
+        Some(RoomDetails {
+            name,
+            topic,
+            member_count,
+            encryption,
+            room_id: room.room_id().to_string(),
+        })
+    }
+
     /// Recover E2EE secrets using a recovery key (or passphrase)
     pub async fn recover_with_key(&self, recovery_key: &str) -> Result<()> {
         self.client
@@ -590,15 +799,6 @@ impl Account {
         Ok(())
     }
 
-    /// Check if session has complete cross-signing keys
-    pub async fn is_verified(&self) -> bool {
-        self.client
-            .encryption()
-            .cross_signing_status()
-            .await
-            .map(|s| s.is_complete())
-            .unwrap_or(false)
-    }
 
     /// Request self-verification (sends request to all other devices)
     pub async fn request_self_verification(
@@ -851,21 +1051,6 @@ fn mime_from_extension(ext: &str) -> mime::Mime {
     }
 }
 
-/// Delete the SQLite session store for a given user/homeserver
-pub fn clear_session_cache(username: &str, homeserver: &str) -> std::io::Result<bool> {
-    let normalized_id = if username.starts_with('@') {
-        username.to_string()
-    } else {
-        format!("@{}:{}", username, homeserver)
-    };
-    let db_path = session_db_path(&normalized_id, homeserver);
-    if db_path.exists() {
-        std::fs::remove_dir_all(&db_path)?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
 
 fn e2ee_settings() -> EncryptionSettings {
     EncryptionSettings {
