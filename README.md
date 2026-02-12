@@ -76,6 +76,58 @@ Recommended: set restrictive permissions on both directories (`chmod 700`). If y
 - Decrypted message content (only held in memory)
 - Your server password in any log file
 
+## Matrix Standard Feature Support
+
+| Feature | Status |
+|---------|--------|
+| Multi-account simultaneous login | Supported |
+| Password login | Supported |
+| Session token persistence | Supported |
+| Send / receive text messages | Supported |
+| End-to-end encryption (Olm/Megolm) | Supported |
+| Session verification (recovery key) | Supported |
+| Session verification (SAS emoji) | Supported |
+| Room key backup download | Supported (automatic on decrypt failure) |
+| Message history (backward pagination) | Supported (50 per page, scroll to load more) |
+| Read receipts | Supported (sent on room open / new messages) |
+| Typing indicators | Supported (send and receive) |
+| Unread message count | Supported |
+| Reply to messages | Supported (`r` key) |
+| Reactions (emoji) | Supported (`e` key, 8 quick-pick emojis) |
+| Edit messages | Supported (via message action menu) |
+| Delete / redact messages | Supported (via message action menu) |
+| Create rooms (public/private/encrypted) | Supported |
+| Edit room name / topic | Supported |
+| Invite users | Supported |
+| Leave rooms | Supported |
+| Room info (topic, members, encryption) | Supported (`Ctrl+I`) |
+| Favorites / room pinning | Supported (`f` key, manual reorder) |
+| Profile editing (display name, avatar) | Supported |
+| Fuzzy room search | Supported (`Ctrl+K`) |
+| Responsive layout (3/2/1 column) | Supported |
+| Image / file messages | Display only (shows `[image]`, `[file: name]`) |
+
+## To Be Implemented
+
+| Feature | Notes |
+|---------|-------|
+| Image / file preview | Inline rendering via sixel/kitty protocol |
+| File upload from TUI | Send images and files from local path |
+| Threads | Matrix threading support |
+| Message search | Search within room or across rooms |
+| Room directory | Browse and join public rooms |
+| Spaces | Matrix spaces navigation |
+| User presence | Online/offline/away status |
+| Push notifications (Termux) | `termux-notification` integration |
+| Command mode | `/join`, `/leave`, `/invite`, `/topic`, etc. |
+| Per-account notification rules | Mute rooms, keyword alerts |
+| Member list | Browsable member list in room info |
+| User profiles | View other users' profiles |
+| Message formatting | Markdown rendering, code blocks |
+| URL previews | Inline link previews |
+| Voice / video calls | Matrix VoIP support |
+| Package distribution | `cargo install` / AUR / brew |
+
 ## Target Platforms
 
 - Linux (Debian, Arch, Fedora) — x86_64, aarch64
