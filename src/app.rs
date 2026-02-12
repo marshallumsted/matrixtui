@@ -1326,7 +1326,8 @@ impl App {
         let user_id = self.accounts[idx].user_id.clone();
         self.status_msg = format!("Reconnecting {}...", user_id);
 
-        // Remove the old account (drops client, stops sync)
+        // Stop sync and remove old account
+        self.accounts[idx].stop_sync();
         self.accounts.remove(idx);
 
         // Re-restore from saved config
@@ -1353,7 +1354,8 @@ impl App {
         }
         let user_id = self.accounts[idx].user_id.clone();
 
-        // Remove from active accounts (drops client, stops sync)
+        // Stop sync and remove from active accounts
+        self.accounts[idx].stop_sync();
         self.accounts.remove(idx);
 
         // Remove from config

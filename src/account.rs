@@ -17,6 +17,7 @@ use matrix_sdk::{
 };
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::config::{SavedAccount, data_dir};
@@ -60,6 +61,7 @@ pub struct Account {
     pub display_name: String,
     pub syncing: bool,
     pub sync_complete: bool,
+    sync_handle: Option<JoinHandle<()>>,
 }
 
 impl Account {
@@ -106,6 +108,7 @@ impl Account {
             client,
             syncing: false,
             sync_complete: false,
+            sync_handle: None,
         };
 
         Ok((account, saved))
@@ -142,6 +145,7 @@ impl Account {
             client,
             syncing: false,
             sync_complete: false,
+            sync_handle: None,
         })
     }
 
@@ -154,7 +158,7 @@ impl Account {
         let client = self.client.clone();
         let account_id = self.user_id.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             info!("Starting sync for {}", account_id);
 
             // Register message handler
@@ -209,6 +213,15 @@ impl Account {
             // Continuous sync
             let _ = client.sync(settings).await;
         });
+        self.sync_handle = Some(handle);
+    }
+
+    /// Stop the background sync task
+    pub fn stop_sync(&mut self) {
+        if let Some(handle) = self.sync_handle.take() {
+            handle.abort();
+        }
+        self.syncing = false;
     }
 
     /// Get joined rooms as RoomInfo
@@ -479,6 +492,14 @@ impl Account {
             .await
             .map(|s| s.is_complete())
             .unwrap_or(false)
+    }
+}
+
+impl Drop for Account {
+    fn drop(&mut self) {
+        if let Some(handle) = self.sync_handle.take() {
+            handle.abort();
+        }
     }
 }
 
