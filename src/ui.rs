@@ -327,6 +327,32 @@ fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
+/// Pre-wrap text into Lines, each prefixed with `indent`, fitting within `width` columns.
+/// Unlike Paragraph::wrap, continuation lines keep the same indent as line 1.
+fn wrap_with_indent<'a>(text: &str, indent: &str, width: usize, style: Style) -> Vec<Line<'a>> {
+    let indent_w = indent.chars().count();
+    let content_w = width.saturating_sub(indent_w).max(1);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![Line::from(Span::styled(indent.to_string(), style))];
+    }
+    chars
+        .chunks(content_w)
+        .map(|chunk| {
+            Line::from(Span::styled(
+                format!("{}{}", indent, chunk.iter().collect::<String>()),
+                style,
+            ))
+        })
+        .collect()
+}
+
+/// Calculate how many visual lines text occupies when wrapped with indent
+fn wrapped_height_indented(text_chars: usize, indent_chars: usize, width: usize) -> usize {
+    let content_w = width.saturating_sub(indent_chars).max(1);
+    if text_chars == 0 { 1 } else { (text_chars + content_w - 1) / content_w }
+}
+
 /// Build an HTTP download URL from an MXC media source (unencrypted only)
 fn media_download_url(source: &MediaSource, homeserver: &str) -> Option<String> {
     match source {
@@ -442,18 +468,15 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         };
 
         // Measure messages from the bottom up to find how many actually fit,
-        // accounting for line wrapping
-        let wrapped_height = |text: &str| -> usize {
-            if inner_width == 0 { 1 } else { (text.len().max(1) + inner_width - 1) / inner_width }
-        };
+        // accounting for line wrapping with consistent indent
         let mut used_height = 0usize;
         let mut start = end;
         for i in (0..end).rev() {
             let msg = &app.messages[i];
             let is_reply = msg.reply_to_sender.is_some();
             let indent = if is_reply { "    " } else { "  " };
-            let sender_text = format!("{}{}", indent, msg.sender);
-            let mut msg_h = wrapped_height(&sender_text);
+            let indent_w = indent.chars().count();
+            let mut msg_h = wrapped_height_indented(msg.sender.chars().count(), indent_w, inner_width);
             match &msg.content {
                 MessageContent::Image { protocol, .. } => {
                     if protocol.is_some() {
@@ -468,21 +491,20 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                         FileKind::Video => "[video: ",
                         FileKind::Audio => "[audio: ",
                     };
-                    let file_text = format!("{}{}{}]", indent, prefix, body);
-                    msg_h += wrapped_height(&file_text);
+                    let content = format!("{}{}]", prefix, body);
+                    msg_h += wrapped_height_indented(content.chars().count(), indent_w, inner_width);
                 }
                 MessageContent::Text(_) => {
                     let body_str = msg.body_text();
-                    let body_text = format!("{}{}", indent, body_str);
-                    msg_h += wrapped_height(&body_text);
+                    msg_h += wrapped_height_indented(body_str.chars().count(), indent_w, inner_width);
                 }
             }
             // Reply context line (may wrap)
             if is_reply {
-                let reply_preview = format!("  \u{2514} {}: {}",
+                let reply_content = format!("\u{2514} {}: {}",
                     msg.reply_to_sender.as_deref().unwrap_or(""),
                     msg.reply_to_body.as_deref().unwrap_or(""));
-                msg_h += wrapped_height(&reply_preview);
+                msg_h += wrapped_height_indented(reply_content.chars().count(), 2, inner_width);
             }
             // Reaction line
             if !msg.reactions.is_empty() {
@@ -551,18 +573,15 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             if let (Some(reply_sender), Some(reply_body)) =
                 (&msg.reply_to_sender, &msg.reply_to_body)
             {
-                let reply_text = format!("  \u{2514} {}: {}", reply_sender, reply_body);
-                visible.push(Line::from(Span::styled(
-                    reply_text,
-                    Style::default()
-                        .fg(theme.text_dim)
-                        .add_modifier(Modifier::ITALIC),
-                )));
+                let reply_content = format!("\u{2514} {}: {}", reply_sender, reply_body);
+                let reply_style = Style::default()
+                    .fg(theme.text_dim)
+                    .add_modifier(Modifier::ITALIC);
+                visible.extend(wrap_with_indent(&reply_content, "  ", inner_width, reply_style));
             }
 
             let indent = if is_reply { "    " } else { "  " };
-            let sender_text = format!("{}{}", indent, msg.sender);
-            visible.push(Line::from(Span::styled(sender_text, sender_style)));
+            visible.extend(wrap_with_indent(&msg.sender, indent, inner_width, sender_style));
 
             match &msg.content {
                 MessageContent::Image { body, loading, protocol, source, .. } => {
@@ -574,21 +593,18 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                             visible.push(Line::from(""));
                         }
                     } else if *loading {
-                        visible.push(Line::from(Span::styled(
-                            format!("{}[loading {}...]", indent, body),
-                            Style::default()
-                                .fg(theme.text_dim)
-                                .add_modifier(Modifier::ITALIC),
-                        )));
+                        let load_text = format!("[loading {}...]", body);
+                        let load_style = Style::default()
+                            .fg(theme.text_dim)
+                            .add_modifier(Modifier::ITALIC);
+                        visible.extend(wrap_with_indent(&load_text, indent, inner_width, load_style));
                     } else {
-                        let display_text = format!("{}[image: {}]", indent, body);
-                        let text_len = display_text.len();
+                        let display_content = format!("[image: {}]", body);
+                        let text_len = indent.len() + display_content.len();
                         link_positions.push((visible.len(), source.clone(), text_len));
-                        visible.push(Line::from(Span::styled(
-                            display_text,
-                            Style::default().fg(theme.text_dim)
-                                .add_modifier(Modifier::UNDERLINED),
-                        )));
+                        let link_style = Style::default().fg(theme.text_dim)
+                            .add_modifier(Modifier::UNDERLINED);
+                        visible.extend(wrap_with_indent(&display_content, indent, inner_width, link_style));
                     }
                 }
                 MessageContent::File { body, source, media_type } => {
@@ -597,19 +613,16 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                         FileKind::Video => "[video: ",
                         FileKind::Audio => "[audio: ",
                     };
-                    let display_text = format!("{}{}{}]", indent, prefix, body);
-                    let text_len = display_text.len();
+                    let display_content = format!("{}{}]", prefix, body);
+                    let text_len = indent.len() + display_content.len();
                     link_positions.push((visible.len(), source.clone(), text_len));
-                    visible.push(Line::from(Span::styled(
-                        display_text,
-                        Style::default().fg(theme.text_dim)
-                            .add_modifier(Modifier::UNDERLINED),
-                    )));
+                    let link_style = Style::default().fg(theme.text_dim)
+                        .add_modifier(Modifier::UNDERLINED);
+                    visible.extend(wrap_with_indent(&display_content, indent, inner_width, link_style));
                 }
                 MessageContent::Text(_) => {
                     let body_str = msg.body_text();
-                    let body_text = format!("{}{}", indent, body_str);
-                    visible.push(Line::from(Span::styled(body_text, body_style)));
+                    visible.extend(wrap_with_indent(body_str, indent, inner_width, body_style));
                 }
             }
 
@@ -1845,10 +1858,10 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         let base_width = (f.area().width * 60 / 100).max(20).min(f.area().width);
         // inner width = base_width - 2 (borders), which is the actual widget width
         let widget_width = (base_width as usize).saturating_sub(2);
-        let full_text = format!("  {}", app.message_edit_text);
-        let full_chars: Vec<char> = full_text.chars().collect();
-        let w = widget_width.max(1);
-        let text_lines = if full_chars.is_empty() { 1 } else { (full_chars.len() + w - 1) / w };
+        let indent_w = 2usize; // "  " prefix
+        let content_w = widget_width.saturating_sub(indent_w).max(1);
+        let text_char_count = app.message_edit_text.chars().count();
+        let text_lines = if text_char_count == 0 { 1 } else { (text_char_count + content_w - 1) / content_w };
         let edit_area_lines = text_lines.clamp(1, 10) as u16;
         let height = (8 + edit_area_lines).min(f.area().height);
         let area = centered_rect(60, height, f.area());
@@ -1887,22 +1900,26 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
             rows[3],
         );
 
-        // Manual character-exact line breaking (no word wrap) so cursor math matches
-        let edit_w = rows[4].width as usize;
-        let edit_lines: Vec<Line> = full_chars
-            .chunks(edit_w.max(1))
-            .map(|chunk| Line::from(chunk.iter().collect::<String>()))
-            .collect();
+        // Manual character-exact line breaking with consistent "  " indent
+        let edit_cw = (rows[4].width as usize).saturating_sub(indent_w).max(1);
+        let text_chars: Vec<char> = app.message_edit_text.chars().collect();
+        let edit_lines: Vec<Line> = if text_chars.is_empty() {
+            vec![Line::from("  ".to_string())]
+        } else {
+            text_chars
+                .chunks(edit_cw)
+                .map(|chunk| Line::from(format!("  {}", chunk.iter().collect::<String>())))
+                .collect()
+        };
         f.render_widget(
             Paragraph::new(edit_lines).style(field_style(true, theme)),
             rows[4],
         );
 
-        // Cursor position uses the same width as the manual line breaking
+        // Cursor position: content wraps at edit_cw, each line prefixed with "  "
         let cursor_char_pos = app.message_edit_text[..app.message_edit_cursor].chars().count();
-        let effective_offset = cursor_char_pos + 2; // +2 for "  " prefix
-        let cursor_row = effective_offset / edit_w.max(1);
-        let cursor_col = effective_offset % edit_w.max(1);
+        let cursor_row = cursor_char_pos / edit_cw;
+        let cursor_col = indent_w + cursor_char_pos % edit_cw;
         let cursor_x = rows[4].x + cursor_col as u16;
         let cursor_y = rows[4].y + cursor_row as u16;
         f.set_cursor_position((
