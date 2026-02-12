@@ -1223,7 +1223,7 @@ impl App {
                     if self.settings_sort_selected + 1 < RoomSortMode::ALL.len() {
                         self.settings_sort_selected += 1;
                     }
-                } else if self.settings_selected < 2 {
+                } else if self.settings_selected < 3 {
                     self.settings_selected += 1;
                 }
             }
@@ -1313,6 +1313,10 @@ impl App {
                         .iter()
                         .position(|m| m == &self.room_sort)
                         .unwrap_or(0);
+                } else if self.settings_selected == 3 {
+                    // Clear Cache
+                    self.do_clear_cache();
+                    self.overlay = Overlay::None;
                 }
             }
             _ => {}
@@ -1376,6 +1380,18 @@ impl App {
 
         if self.accounts.is_empty() {
             self.status_msg = "No accounts \u{2014} press 's' to add one".to_string();
+        }
+    }
+
+    fn do_clear_cache(&mut self) {
+        let sessions_dir = crate::config::data_dir().join("sessions");
+        if sessions_dir.exists() {
+            match std::fs::remove_dir_all(&sessions_dir) {
+                Ok(_) => self.status_msg = "Cache cleared".to_string(),
+                Err(e) => self.status_msg = format!("Failed to clear cache: {}", e),
+            }
+        } else {
+            self.status_msg = "No cache to clear".to_string();
         }
     }
 

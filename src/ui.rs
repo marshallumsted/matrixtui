@@ -657,7 +657,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
 
     // Dynamic height based on expanded sub-menus
-    let mut content_lines: u16 = 6; // top_pad + Accounts + Theme + Sort + bottom_pad + hint
+    let mut content_lines: u16 = 7; // top_pad + Accounts + Theme + Sort + Clear Cache + bottom_pad + hint
     if app.settings_accounts_open {
         content_lines += 1 + app.accounts.len() as u16; // Add Account + each account
         if app.settings_account_action_open {
@@ -881,6 +881,24 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
             )));
         }
     }
+
+    // --- Clear Cache item ---
+    let sel3 = at_top && app.settings_selected == 3;
+    let (prefix3, style3) = if sel3 {
+        (
+            "  > ",
+            Style::default()
+                .fg(theme.status_err)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("    ", Style::default().fg(theme.status_err))
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{}Clear Cache", prefix3),
+        style3,
+    )));
 
     // Bottom padding
     lines.push(Line::from(""));

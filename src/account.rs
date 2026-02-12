@@ -514,6 +514,22 @@ fn mime_from_extension(ext: &str) -> mime::Mime {
     }
 }
 
+/// Delete the SQLite session store for a given user/homeserver
+pub fn clear_session_cache(username: &str, homeserver: &str) -> std::io::Result<bool> {
+    let normalized_id = if username.starts_with('@') {
+        username.to_string()
+    } else {
+        format!("@{}:{}", username, homeserver)
+    };
+    let db_path = session_db_path(&normalized_id, homeserver);
+    if db_path.exists() {
+        std::fs::remove_dir_all(&db_path)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 fn normalize_homeserver(hs: &str) -> String {
     if hs.starts_with("http://") || hs.starts_with("https://") {
         hs.to_string()
