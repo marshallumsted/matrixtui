@@ -2,9 +2,13 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use matrix_sdk::encryption::verification::SasVerification;
 use matrix_sdk::ruma::OwnedRoomId;
+use matrix_sdk::ruma::events::room::MediaSource;
 use ratatui::prelude::*;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
@@ -78,6 +82,7 @@ pub enum Overlay {
     SasVerify,
     EmojiPicker,
     RoomInfo,
+    FileConfirm,
 }
 
 /// State of the SAS verification overlay
@@ -91,17 +96,72 @@ pub enum SasOverlayState {
     Failed,     // cancelled or error
 }
 
+/// Kind of non-image file attachment
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FileKind {
+    File,
+    Video,
+    Audio,
+}
+
+/// Content type for a display message
+#[derive(Clone)]
+pub enum MessageContent {
+    Text(String),
+    Image {
+        body: String, // filename / caption
+        source: MediaSource,
+        protocol: Option<Arc<Mutex<StatefulProtocol>>>,
+        loading: bool,
+    },
+    File {
+        body: String,        // filename
+        source: MediaSource, // for download + URL
+        media_type: FileKind,
+    },
+}
+
+impl std::fmt::Debug for MessageContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(s) => f.debug_tuple("Text").field(s).finish(),
+            Self::Image { body, loading, .. } => f
+                .debug_struct("Image")
+                .field("body", body)
+                .field("loading", loading)
+                .finish(),
+            Self::File { body, media_type, .. } => f
+                .debug_struct("File")
+                .field("body", body)
+                .field("media_type", media_type)
+                .finish(),
+        }
+    }
+}
+
 /// A message stored for display
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
     pub event_id: Option<String>,
     pub sender: String,
-    pub body: String,
+    pub content: MessageContent,
     pub timestamp: u64,
     pub reply_to_sender: Option<String>,
     pub reply_to_body: Option<String>,
     pub reply_to_event_id_raw: Option<String>,
     pub reactions: Vec<(String, u16)>,
+}
+
+impl DisplayMessage {
+    /// Get the display text for this message
+    pub fn body_text(&self) -> &str {
+        match &self.content {
+            MessageContent::Text(s) => s,
+            MessageContent::Image { body, .. } => body,
+            MessageContent::File { body, .. } => body,
+        }
+    }
+
 }
 
 pub struct App {
@@ -110,6 +170,7 @@ pub struct App {
     pub focus: Focus,
     pub overlay: Overlay,
     pub running: bool,
+    pub picker: Picker,
 
     // Room state
     pub all_rooms: Vec<RoomInfo>,
@@ -130,6 +191,7 @@ pub struct App {
     // Input state
     pub input: String,
     pub cursor_pos: usize,
+    pub last_typing_sent: Option<std::time::Instant>,
 
     // Login form state
     pub login_homeserver: String,
@@ -246,13 +308,17 @@ pub struct App {
     // Selected account in account list
     pub selected_account: usize,
 
+    // File drop state
+    pub pending_file_drop: Option<String>,
+
     // Channels
     matrix_tx: mpsc::UnboundedSender<MatrixEvent>,
     matrix_rx: Option<mpsc::UnboundedReceiver<MatrixEvent>>,
+    pub app_tx: Option<mpsc::UnboundedSender<AppEvent>>,
 }
 
 impl App {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, picker: Picker) -> Self {
         let (matrix_tx, matrix_rx) = mpsc::unbounded_channel();
         let theme = ui::theme_by_name(&config.theme);
         let room_sort = RoomSortMode::from_str(&config.room_sort);
@@ -262,6 +328,7 @@ impl App {
             focus: Focus::Rooms,
             overlay: Overlay::None,
             running: true,
+            picker,
             all_rooms: Vec::new(),
             selected_room: 0,
             active_room: None,
@@ -276,6 +343,7 @@ impl App {
             replying_to: None,
             input: String::new(),
             cursor_pos: 0,
+            last_typing_sent: None,
             login_homeserver: String::new(),
             login_username: String::new(),
             login_password: String::new(),
@@ -353,8 +421,10 @@ impl App {
             theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
+            pending_file_drop: None,
             matrix_tx,
             matrix_rx: Some(matrix_rx),
+            app_tx: None,
         }
     }
 
@@ -387,6 +457,7 @@ impl App {
     /// Main event loop
     pub async fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
         let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+        self.app_tx = Some(app_tx.clone());
 
         // Start input reader
         spawn_input_reader(app_tx.clone());
@@ -404,6 +475,10 @@ impl App {
                     AppEvent::Key(key) => self.handle_key(key).await,
                     AppEvent::Resize => {} // ratatui handles this on next draw
                     AppEvent::Matrix(mev) => self.handle_matrix_event(mev).await,
+                    AppEvent::Paste(data) => self.handle_paste(data).await,
+                    AppEvent::ImageReady { room_id, event_id, protocol } => {
+                        self.handle_image_ready(&room_id, &event_id, protocol);
+                    }
                     AppEvent::Tick => {}
                 }
             }
@@ -434,6 +509,12 @@ impl App {
                 self.overlay = Overlay::RoomSwitcher;
                 self.switcher_query.clear();
                 self.switcher_selected = 0;
+                return;
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                if self.overlay == Overlay::None && self.active_room.is_some() {
+                    self.open_file_picker().await;
+                }
                 return;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
@@ -503,6 +584,7 @@ impl App {
                     self.overlay = Overlay::None;
                 }
             }
+            Overlay::FileConfirm => self.handle_file_confirm_key(key).await,
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
@@ -1264,12 +1346,23 @@ impl App {
 
     // --- Message Actions ---
 
+    /// Get context-sensitive action labels for the selected message
+    pub fn message_action_labels(&self) -> Vec<&'static str> {
+        match self.selected_message.and_then(|i| self.messages.get(i)) {
+            Some(msg) => match &msg.content {
+                MessageContent::Text(_) => vec!["Edit Message", "Delete Message"],
+                _ => vec!["Download", "Delete Message"],
+            },
+            None => vec!["Edit Message", "Delete Message"],
+        }
+    }
+
     fn open_message_action(&mut self) {
         if let Some(idx) = self.selected_message {
             if idx < self.messages.len() {
                 self.message_action_selected = 0;
                 self.message_editing = false;
-                self.message_edit_text = self.messages[idx].body.clone();
+                self.message_edit_text = self.messages[idx].body_text().to_string();
                 self.message_edit_cursor = self.message_edit_text.len();
                 self.message_edit_error = None;
                 self.message_edit_busy = false;
@@ -1295,12 +1388,17 @@ impl App {
                 }
                 KeyCode::Char(c) => {
                     self.message_edit_text.insert(self.message_edit_cursor, c);
-                    self.message_edit_cursor += 1;
+                    self.message_edit_cursor += c.len_utf8();
                 }
                 KeyCode::Backspace => {
                     if self.message_edit_cursor > 0 {
-                        self.message_edit_cursor -= 1;
-                        self.message_edit_text.remove(self.message_edit_cursor);
+                        let prev = self.message_edit_text[..self.message_edit_cursor]
+                            .char_indices()
+                            .next_back()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        self.message_edit_text.remove(prev);
+                        self.message_edit_cursor = prev;
                     }
                 }
                 KeyCode::Delete => {
@@ -1309,11 +1407,22 @@ impl App {
                     }
                 }
                 KeyCode::Left => {
-                    self.message_edit_cursor = self.message_edit_cursor.saturating_sub(1);
+                    if self.message_edit_cursor > 0 {
+                        let prev = self.message_edit_text[..self.message_edit_cursor]
+                            .char_indices()
+                            .next_back()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        self.message_edit_cursor = prev;
+                    }
                 }
                 KeyCode::Right => {
                     if self.message_edit_cursor < self.message_edit_text.len() {
-                        self.message_edit_cursor += 1;
+                        let ch = self.message_edit_text[self.message_edit_cursor..]
+                            .chars()
+                            .next()
+                            .unwrap();
+                        self.message_edit_cursor += ch.len_utf8();
                     }
                 }
                 KeyCode::Home => self.message_edit_cursor = 0,
@@ -1323,19 +1432,22 @@ impl App {
             return;
         }
 
+        let actions = self.message_action_labels();
+        let max_idx = actions.len().saturating_sub(1);
+
         match key.code {
             KeyCode::Up => {
                 self.message_action_selected = self.message_action_selected.saturating_sub(1);
             }
             KeyCode::Down => {
-                if self.message_action_selected < 1 {
+                if self.message_action_selected < max_idx {
                     self.message_action_selected += 1;
                 }
             }
             KeyCode::Enter => {
-                match self.message_action_selected {
-                    0 => {
-                        // Edit — open text editor
+                let label = actions.get(self.message_action_selected).copied().unwrap_or("");
+                match label {
+                    "Edit Message" => {
                         if let Some(idx) = self.selected_message {
                             if let Some(msg) = self.messages.get(idx) {
                                 if msg.event_id.is_none() {
@@ -1349,9 +1461,11 @@ impl App {
                             }
                         }
                     }
-                    1 => {
-                        // Delete
+                    "Delete Message" => {
                         self.do_delete_message().await;
+                    }
+                    "Download" => {
+                        self.do_download_media().await;
                     }
                     _ => {}
                 }
@@ -1395,7 +1509,7 @@ impl App {
                 Ok(()) => {
                     // Update local message
                     if let Some(m) = self.messages.get_mut(msg_idx) {
-                        m.body = self.message_edit_text.clone();
+                        m.content = MessageContent::Text(self.message_edit_text.clone());
                     }
                     self.overlay = Overlay::None;
                     self.status_msg = "Message edited".to_string();
@@ -1447,6 +1561,65 @@ impl App {
                 }
                 Err(e) => {
                     self.message_edit_error = Some(e.to_string());
+                }
+            }
+        }
+        self.message_edit_busy = false;
+    }
+
+    async fn do_download_media(&mut self) {
+        let msg_idx = match self.selected_message {
+            Some(idx) => idx,
+            None => return,
+        };
+        let msg = match self.messages.get(msg_idx) {
+            Some(m) => m.clone(),
+            None => return,
+        };
+        let (source, filename) = match &msg.content {
+            MessageContent::Image { source, body, .. } => (source.clone(), body.clone()),
+            MessageContent::File { source, body, .. } => (source.clone(), body.clone()),
+            _ => {
+                self.message_edit_error = Some("No media to download".to_string());
+                return;
+            }
+        };
+        let account_id = match &self.active_account_id {
+            Some(a) => a.clone(),
+            None => return,
+        };
+
+        self.message_edit_busy = true;
+        self.message_edit_error = None;
+
+        let download_dir = dirs::download_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Downloads"));
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
+            self.message_edit_error = Some(format!("Cannot create download dir: {}", e));
+            self.message_edit_busy = false;
+            return;
+        }
+
+        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match account.download_media(&source).await {
+                Ok(bytes) => {
+                    let dest = download_dir.join(&filename);
+                    match std::fs::write(&dest, &bytes) {
+                        Ok(()) => {
+                            self.status_msg = format!(
+                                "Downloaded {} ({} bytes)",
+                                filename,
+                                bytes.len()
+                            );
+                            self.overlay = Overlay::None;
+                        }
+                        Err(e) => {
+                            self.message_edit_error = Some(format!("Write failed: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.message_edit_error = Some(format!("Download failed: {}", e));
                 }
             }
         }
@@ -1580,10 +1753,11 @@ impl App {
                 if let Some(idx) = idx {
                     if let Some(msg) = self.messages.get(idx) {
                         if let Some(ref eid) = msg.event_id {
-                            let snippet = if msg.body.len() > 50 {
-                                format!("{}...", &msg.body[..50])
+                            let body = msg.body_text();
+                            let snippet = if body.len() > 50 {
+                                format!("{}...", &body[..50])
                             } else {
-                                msg.body.clone()
+                                body.to_string()
                             };
                             self.replying_to = Some((
                                 eid.clone(),
@@ -1621,12 +1795,19 @@ impl App {
                     let msg = self.input.clone();
                     self.input.clear();
                     self.cursor_pos = 0;
-                    // Send typing=false
+                    self.last_typing_sent = None;
+                    // Send typing=false (non-blocking)
                     if let (Some(ref room_id), Some(ref aid)) =
                         (self.active_room.clone(), self.active_account_id.clone())
                     {
                         if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
-                            let _ = account.send_typing(room_id, false).await;
+                            let room_id = room_id.clone();
+                            let client = account.client.clone();
+                            tokio::spawn(async move {
+                                if let Some(room) = client.get_room(&room_id) {
+                                    let _ = room.typing_notice(false).await;
+                                }
+                            });
                         }
                     }
                     if let Some((reply_eid, reply_sender, _)) = self.replying_to.take() {
@@ -1639,12 +1820,24 @@ impl App {
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
-                // Send typing notice
-                if let (Some(ref room_id), Some(ref aid)) =
-                    (self.active_room.clone(), self.active_account_id.clone())
-                {
-                    if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
-                        let _ = account.send_typing(room_id, true).await;
+                // Send typing notice (throttled, non-blocking)
+                let should_send = self.last_typing_sent
+                    .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                    .unwrap_or(true);
+                if should_send {
+                    self.last_typing_sent = Some(std::time::Instant::now());
+                    if let (Some(ref room_id), Some(ref aid)) =
+                        (self.active_room.clone(), self.active_account_id.clone())
+                    {
+                        if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                            let room_id = room_id.clone();
+                            let client = account.client.clone();
+                            tokio::spawn(async move {
+                                if let Some(room) = client.get_room(&room_id) {
+                                    let _ = room.typing_notice(true).await;
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -1671,12 +1864,19 @@ impl App {
             KeyCode::End => self.cursor_pos = self.input.len(),
             KeyCode::Esc => {
                 self.replying_to = None;
-                // Send typing=false
+                self.last_typing_sent = None;
+                // Send typing=false (non-blocking)
                 if let (Some(ref room_id), Some(ref aid)) =
                     (self.active_room.clone(), self.active_account_id.clone())
                 {
                     if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
-                        let _ = account.send_typing(room_id, false).await;
+                        let room_id = room_id.clone();
+                        let client = account.client.clone();
+                        tokio::spawn(async move {
+                            if let Some(room) = client.get_room(&room_id) {
+                                let _ = room.typing_notice(false).await;
+                            }
+                        });
                     }
                 }
                 self.focus = Focus::Chat;
@@ -2112,7 +2312,7 @@ impl App {
                     let msg = DisplayMessage {
                         event_id: None, // filled in when sync returns the event
                         sender: account.user_id.clone(),
-                        body: body.to_string(),
+                        content: MessageContent::Text(body.to_string()),
                         timestamp: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -2153,7 +2353,7 @@ impl App {
                     let msg = DisplayMessage {
                         event_id: None,
                         sender: account.user_id.clone(),
-                        body: body.to_string(),
+                        content: MessageContent::Text(body.to_string()),
                         timestamp: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -2197,10 +2397,11 @@ impl App {
                     })
             });
         if let Some(orig) = found {
-            let snippet = if orig.body.len() > 50 {
-                format!("{}...", &orig.body[..50])
+            let body = orig.body_text();
+            let snippet = if body.len() > 50 {
+                format!("{}...", &body[..50])
             } else {
-                orig.body.clone()
+                body.to_string()
             };
             (Some(orig.sender.clone()), Some(snippet))
         } else {
@@ -2215,10 +2416,11 @@ impl App {
             .iter()
             .filter_map(|m| {
                 let eid = m.event_id.as_ref()?;
-                let snippet = if m.body.len() > 50 {
-                    format!("{}...", &m.body[..50])
+                let body = m.body_text();
+                let snippet = if body.len() > 50 {
+                    format!("{}...", &body[..50])
                 } else {
-                    m.body.clone()
+                    body.to_string()
                 };
                 Some((eid.clone(), (m.sender.clone(), snippet)))
             })
@@ -2266,7 +2468,7 @@ impl App {
                 let msg = DisplayMessage {
                     event_id: Some(event_id),
                     sender: sender.to_string(),
-                    body,
+                    content: MessageContent::Text(body),
                     timestamp,
                     reply_to_sender,
                     reply_to_body,
@@ -2289,6 +2491,91 @@ impl App {
                             let _ = account.send_read_receipt(&room_id, &receipt_eid).await;
                         }
                     }
+                }
+            }
+            MatrixEvent::ImageMessage {
+                room_id,
+                sender,
+                timestamp,
+                event_id,
+                body,
+                source,
+                reply_to_event_id,
+            } => {
+                let (reply_to_sender, reply_to_body) =
+                    if let Some(ref reply_eid) = reply_to_event_id {
+                        self.resolve_reply_context(&room_id, reply_eid)
+                    } else {
+                        (None, None)
+                    };
+
+                let msg = DisplayMessage {
+                    event_id: Some(event_id.clone()),
+                    sender: sender.to_string(),
+                    content: MessageContent::Image {
+                        body: body.clone(),
+                        source: source.clone(),
+                        protocol: None,
+                        loading: true,
+                    },
+                    timestamp,
+                    reply_to_sender,
+                    reply_to_body,
+                    reply_to_event_id_raw: reply_to_event_id,
+                    reactions: Vec::new(),
+                };
+
+                self.room_messages
+                    .entry(room_id.clone())
+                    .or_default()
+                    .push(msg.clone());
+
+                if Some(&room_id) == self.active_room.as_ref() {
+                    self.messages.push(msg);
+                }
+
+                // Spawn async image download
+                self.spawn_image_download(room_id, event_id, source);
+            }
+            MatrixEvent::FileMessage {
+                room_id,
+                sender,
+                timestamp,
+                event_id,
+                body,
+                source,
+                media_type,
+                reply_to_event_id,
+            } => {
+                let (reply_to_sender, reply_to_body) =
+                    if let Some(ref reply_eid) = reply_to_event_id {
+                        self.resolve_reply_context(&room_id, reply_eid)
+                    } else {
+                        (None, None)
+                    };
+
+                let msg = DisplayMessage {
+                    event_id: Some(event_id),
+                    sender: sender.to_string(),
+                    content: MessageContent::File {
+                        body,
+                        source,
+                        media_type,
+                    },
+                    timestamp,
+                    reply_to_sender,
+                    reply_to_body,
+                    reply_to_event_id_raw: reply_to_event_id,
+                    reactions: Vec::new(),
+                };
+
+                self.room_messages
+                    .entry(room_id.clone())
+                    .or_default()
+                    .push(msg.clone());
+
+                if Some(&room_id) == self.active_room.as_ref() {
+                    self.messages.push(msg);
                 }
             }
             MatrixEvent::Typing { room_id, user_ids } => {
@@ -2360,6 +2647,7 @@ impl App {
                                 Ok(msgs) => {
                                     let count = msgs.len();
                                     self.messages = msgs;
+                                    self.trigger_image_downloads();
                                     info!("Re-fetch got {} messages", count);
                                 }
                                 Err(e) => {
@@ -2380,8 +2668,9 @@ impl App {
                         match account.fetch_history(&room_id, 50).await {
                             Ok(msgs) if !msgs.is_empty() => {
                                 let count = msgs.len();
-                                let decrypted = msgs.iter().filter(|m| !m.body.contains("[encrypted message")).count();
+                                let decrypted = msgs.iter().filter(|m| !m.body_text().contains("[encrypted message")).count();
                                 self.messages = msgs;
+                                self.trigger_image_downloads();
                                 self.status_msg = format!("Decrypted {}/{} messages", decrypted, count);
                             }
                             _ => {}
@@ -2558,8 +2847,9 @@ impl App {
                     Ok((msgs, end_token)) if !msgs.is_empty() => {
                         let count = msgs.len();
                         self.room_history_tokens.insert(room_id.clone(), end_token);
-                        let has_encrypted = msgs.iter().any(|m| m.body.contains("[encrypted message"));
+                        let has_encrypted = msgs.iter().any(|m| m.body_text().contains("[encrypted message"));
                         self.messages = msgs;
+                        self.trigger_image_downloads();
                         if has_encrypted {
                             // Encrypted messages found — SDK will auto-download keys
                             // Schedule a delayed re-fetch to pick up decrypted content
@@ -2648,6 +2938,239 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    // --- Image download ---
+
+    /// Trigger downloads for any image messages that haven't been loaded yet
+    fn trigger_image_downloads(&self) {
+        for msg in &self.messages {
+            if let MessageContent::Image {
+                ref source,
+                ref protocol,
+                ..
+            } = msg.content
+            {
+                if protocol.is_none() {
+                    if let Some(ref eid) = msg.event_id {
+                        if let Some(ref room_id) = self.active_room {
+                            self.spawn_image_download(
+                                room_id.clone(),
+                                eid.clone(),
+                                source.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn spawn_image_download(
+        &self,
+        room_id: OwnedRoomId,
+        event_id: String,
+        source: MediaSource,
+    ) {
+        let app_tx = match &self.app_tx {
+            Some(tx) => tx.clone(),
+            None => return,
+        };
+        let active_account_id = self.active_account_id.clone();
+        let accounts_clients: Vec<_> = self
+            .accounts
+            .iter()
+            .map(|a| (a.user_id.clone(), a.client.clone()))
+            .collect();
+        let font_size = self.picker.font_size();
+
+        tokio::spawn(async move {
+            // Find the right client for this room
+            let client = if let Some(aid) = &active_account_id {
+                accounts_clients
+                    .iter()
+                    .find(|(uid, _)| uid == aid)
+                    .map(|(_, c)| c.clone())
+            } else {
+                accounts_clients.first().map(|(_, c)| c.clone())
+            };
+            let client = match client {
+                Some(c) => c,
+                None => return,
+            };
+
+            let request = matrix_sdk::media::MediaRequestParameters {
+                source: source.clone(),
+                format: matrix_sdk::media::MediaFormat::Thumbnail(
+                    matrix_sdk::media::MediaThumbnailSettings::new(
+                        matrix_sdk::ruma::UInt::from(400u32),
+                        matrix_sdk::ruma::UInt::from(300u32),
+                    ),
+                ),
+            };
+            let bytes = match client.media().get_media_content(&request, true).await {
+                Ok(b) => b,
+                Err(_) => {
+                    let full = matrix_sdk::media::MediaRequestParameters {
+                        source,
+                        format: matrix_sdk::media::MediaFormat::File,
+                    };
+                    match client.media().get_media_content(&full, true).await {
+                        Ok(b) => b,
+                        Err(_) => return,
+                    }
+                }
+            };
+
+            if let Ok(dyn_img) = image::load_from_memory(&bytes) {
+                let picker = Picker::from_fontsize(font_size);
+                let proto = picker.new_resize_protocol(dyn_img);
+                let _ = app_tx.send(AppEvent::ImageReady {
+                    room_id,
+                    event_id,
+                    protocol: Arc::new(Mutex::new(proto)),
+                });
+            }
+        });
+    }
+
+    fn handle_image_ready(
+        &mut self,
+        room_id: &OwnedRoomId,
+        event_id: &str,
+        protocol: Arc<Mutex<StatefulProtocol>>,
+    ) {
+        // Update in active messages
+        if Some(room_id) == self.active_room.as_ref() {
+            if let Some(msg) = self
+                .messages
+                .iter_mut()
+                .find(|m| m.event_id.as_deref() == Some(event_id))
+            {
+                if let MessageContent::Image {
+                    protocol: ref mut p,
+                    loading: ref mut l,
+                    ..
+                } = msg.content
+                {
+                    *p = Some(protocol.clone());
+                    *l = false;
+                }
+            }
+        }
+        // Update in room_messages cache
+        if let Some(msgs) = self.room_messages.get_mut(room_id) {
+            if let Some(msg) = msgs
+                .iter_mut()
+                .find(|m| m.event_id.as_deref() == Some(event_id))
+            {
+                if let MessageContent::Image {
+                    protocol: ref mut p,
+                    loading: ref mut l,
+                    ..
+                } = msg.content
+                {
+                    *p = Some(protocol);
+                    *l = false;
+                }
+            }
+        }
+    }
+
+    // --- Paste / drag-and-drop ---
+
+    async fn handle_paste(&mut self, data: String) {
+        let path = data.trim().trim_matches('\'').trim_matches('"');
+        let p = std::path::Path::new(path);
+        if p.exists() && p.is_file() {
+            // File was dropped — confirm before sending
+            self.pending_file_drop = Some(path.to_string());
+            self.overlay = Overlay::FileConfirm;
+        } else {
+            // Regular paste — insert into input
+            self.input.insert_str(self.cursor_pos, &data);
+            self.cursor_pos += data.len();
+        }
+    }
+
+    // --- File picker ---
+
+    async fn open_file_picker(&mut self) {
+        // kdialog/zenity are GUI programs — no need to exit TUI
+        let output = tokio::process::Command::new("kdialog")
+            .args(["--getopenfilename", ".", "All Files (*)"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .or_else(|_| {
+                // Fallback: try zenity synchronously if kdialog unavailable
+                std::process::Command::new("zenity")
+                    .args(["--file-selection"])
+                    .output()
+            });
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .to_string();
+                if !path.is_empty() {
+                    self.send_file_attachment(&path).await;
+                }
+            }
+        }
+    }
+
+    async fn send_file_attachment(&mut self, path_str: &str) {
+        let path = std::path::Path::new(path_str);
+        let room_id = match &self.active_room {
+            Some(id) => id.clone(),
+            None => {
+                self.status_msg = "No active room".to_string();
+                return;
+            }
+        };
+        let account_id = match &self.active_account_id {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        self.status_msg = format!("Sending {}...", filename);
+
+        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match account.send_attachment(&room_id, path).await {
+                Ok(()) => {
+                    self.status_msg = format!("Sent {}", filename);
+                }
+                Err(e) => {
+                    self.status_msg = format!("Upload failed: {}", e);
+                }
+            }
+        }
+    }
+
+    // --- File confirm overlay ---
+
+    async fn handle_file_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(path) = self.pending_file_drop.take() {
+                    self.overlay = Overlay::None;
+                    self.send_file_attachment(&path).await;
+                }
+            }
+            KeyCode::Esc => {
+                self.pending_file_drop = None;
+                self.overlay = Overlay::None;
+            }
+            _ => {}
         }
     }
 

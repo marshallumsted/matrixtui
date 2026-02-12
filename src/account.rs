@@ -7,6 +7,7 @@ use matrix_sdk::{
         BackupDownloadStrategy, EncryptionSettings,
         verification::{SasVerification, VerificationRequest, VerificationRequestState},
     },
+    media::{MediaFormat, MediaRequestParameters},
     room::MessagesOptions,
     ruma::{
         OwnedEventId, OwnedRoomId, OwnedUserId, UInt, UserId,
@@ -22,6 +23,7 @@ use matrix_sdk::{
                 Relation, ReplyMetadata, RoomMessageEventContent,
                 RoomMessageEventContentWithoutRelation, SyncRoomMessageEvent,
             },
+            room::MediaSource,
             typing::TypingEventContent,
         },
     },
@@ -113,6 +115,25 @@ pub enum MatrixEvent {
     SasCancelled {
         flow_id: String,
         reason: String,
+    },
+    ImageMessage {
+        room_id: OwnedRoomId,
+        sender: OwnedUserId,
+        timestamp: u64,
+        event_id: String,
+        body: String,
+        source: MediaSource,
+        reply_to_event_id: Option<String>,
+    },
+    FileMessage {
+        room_id: OwnedRoomId,
+        sender: OwnedUserId,
+        timestamp: u64,
+        event_id: String,
+        body: String,
+        source: MediaSource,
+        media_type: crate::app::FileKind,
+        reply_to_event_id: Option<String>,
     },
 }
 
@@ -252,21 +273,77 @@ impl Account {
                 move |event: OriginalSyncRoomMessageEvent, room: Room| {
                     let tx = tx_msg.clone();
                     async move {
-                        let body = match &event.content.msgtype {
-                            MessageType::Text(text) => text.body.clone(),
-                            MessageType::Image(_) => "[image]".to_string(),
-                            MessageType::File(f) => format!("[file: {}]", f.filename()),
-                            MessageType::Video(_) => "[video]".to_string(),
-                            MessageType::Audio(_) => "[audio]".to_string(),
-                            MessageType::Notice(n) => n.body.clone(),
-                            MessageType::Emote(e) => format!("* {}", e.body),
-                            _ => "[unsupported message type]".to_string(),
-                        };
                         let reply_to_event_id = match &event.content.relates_to {
                             Some(Relation::Reply { in_reply_to }) => {
                                 Some(in_reply_to.event_id.to_string())
                             }
                             _ => None,
+                        };
+                        // Handle image messages separately
+                        if let MessageType::Image(ref img) = event.content.msgtype {
+                            let _ = tx.send(MatrixEvent::ImageMessage {
+                                room_id: room.room_id().to_owned(),
+                                sender: event.sender.clone(),
+                                timestamp: event.origin_server_ts.as_secs().into(),
+                                event_id: event.event_id.to_string(),
+                                body: img.filename().to_string(),
+                                source: img.source.clone(),
+                                reply_to_event_id,
+                            });
+                            let _ = tx.send(MatrixEvent::RoomsUpdated);
+                            return;
+                        }
+                        // Handle file/video/audio messages separately
+                        match &event.content.msgtype {
+                            MessageType::File(f) => {
+                                let _ = tx.send(MatrixEvent::FileMessage {
+                                    room_id: room.room_id().to_owned(),
+                                    sender: event.sender.clone(),
+                                    timestamp: event.origin_server_ts.as_secs().into(),
+                                    event_id: event.event_id.to_string(),
+                                    body: f.filename().to_string(),
+                                    source: f.source.clone(),
+                                    media_type: crate::app::FileKind::File,
+                                    reply_to_event_id,
+                                });
+                                let _ = tx.send(MatrixEvent::RoomsUpdated);
+                                return;
+                            }
+                            MessageType::Video(v) => {
+                                let _ = tx.send(MatrixEvent::FileMessage {
+                                    room_id: room.room_id().to_owned(),
+                                    sender: event.sender.clone(),
+                                    timestamp: event.origin_server_ts.as_secs().into(),
+                                    event_id: event.event_id.to_string(),
+                                    body: v.filename().to_string(),
+                                    source: v.source.clone(),
+                                    media_type: crate::app::FileKind::Video,
+                                    reply_to_event_id,
+                                });
+                                let _ = tx.send(MatrixEvent::RoomsUpdated);
+                                return;
+                            }
+                            MessageType::Audio(a) => {
+                                let _ = tx.send(MatrixEvent::FileMessage {
+                                    room_id: room.room_id().to_owned(),
+                                    sender: event.sender.clone(),
+                                    timestamp: event.origin_server_ts.as_secs().into(),
+                                    event_id: event.event_id.to_string(),
+                                    body: a.filename().to_string(),
+                                    source: a.source.clone(),
+                                    media_type: crate::app::FileKind::Audio,
+                                    reply_to_event_id,
+                                });
+                                let _ = tx.send(MatrixEvent::RoomsUpdated);
+                                return;
+                            }
+                            _ => {}
+                        }
+                        let body = match &event.content.msgtype {
+                            MessageType::Text(text) => text.body.clone(),
+                            MessageType::Notice(n) => n.body.clone(),
+                            MessageType::Emote(e) => format!("* {}", e.body),
+                            _ => "[unsupported message type]".to_string(),
                         };
                         // Strip reply fallback from body if this is a reply
                         let body = if reply_to_event_id.is_some() {
@@ -428,38 +505,98 @@ impl Account {
                 Ok(AnySyncTimelineEvent::MessageLike(
                     AnySyncMessageLikeEvent::RoomMessage(SyncRoomMessageEvent::Original(original)),
                 )) => {
-                    let body = match &original.content.msgtype {
-                        MessageType::Text(text) => text.body.clone(),
-                        MessageType::Image(_) => "[image]".to_string(),
-                        MessageType::File(f) => format!("[file: {}]", f.filename()),
-                        MessageType::Video(_) => "[video]".to_string(),
-                        MessageType::Audio(_) => "[audio]".to_string(),
-                        MessageType::Notice(n) => n.body.clone(),
-                        MessageType::Emote(e) => format!("* {}", e.body),
-                        _ => "[unsupported message type]".to_string(),
-                    };
                     let reply_to_event_id = match &original.content.relates_to {
                         Some(Relation::Reply { in_reply_to }) => {
                             Some(in_reply_to.event_id.to_string())
                         }
                         _ => None,
                     };
-                    // Strip reply fallback from body if this is a reply
-                    let body = if reply_to_event_id.is_some() {
-                        strip_reply_fallback(&body)
+                    // Handle image messages with full metadata
+                    if let MessageType::Image(ref img) = original.content.msgtype {
+                        messages.push(crate::app::DisplayMessage {
+                            sender: original.sender.to_string(),
+                            content: crate::app::MessageContent::Image {
+                                body: img.filename().to_string(),
+                                source: img.source.clone(),
+                                protocol: None,
+                                loading: false,
+                            },
+                            timestamp: original.origin_server_ts.as_secs().into(),
+                            event_id: Some(original.event_id.to_string()),
+                            reply_to_sender: None,
+                            reply_to_body: None,
+                            reactions: Vec::new(),
+                            reply_to_event_id_raw: reply_to_event_id,
+                        });
+                    } else if let MessageType::File(ref f) = original.content.msgtype {
+                        messages.push(crate::app::DisplayMessage {
+                            sender: original.sender.to_string(),
+                            content: crate::app::MessageContent::File {
+                                body: f.filename().to_string(),
+                                source: f.source.clone(),
+                                media_type: crate::app::FileKind::File,
+                            },
+                            timestamp: original.origin_server_ts.as_secs().into(),
+                            event_id: Some(original.event_id.to_string()),
+                            reply_to_sender: None,
+                            reply_to_body: None,
+                            reactions: Vec::new(),
+                            reply_to_event_id_raw: reply_to_event_id,
+                        });
+                    } else if let MessageType::Video(ref v) = original.content.msgtype {
+                        messages.push(crate::app::DisplayMessage {
+                            sender: original.sender.to_string(),
+                            content: crate::app::MessageContent::File {
+                                body: v.filename().to_string(),
+                                source: v.source.clone(),
+                                media_type: crate::app::FileKind::Video,
+                            },
+                            timestamp: original.origin_server_ts.as_secs().into(),
+                            event_id: Some(original.event_id.to_string()),
+                            reply_to_sender: None,
+                            reply_to_body: None,
+                            reactions: Vec::new(),
+                            reply_to_event_id_raw: reply_to_event_id,
+                        });
+                    } else if let MessageType::Audio(ref a) = original.content.msgtype {
+                        messages.push(crate::app::DisplayMessage {
+                            sender: original.sender.to_string(),
+                            content: crate::app::MessageContent::File {
+                                body: a.filename().to_string(),
+                                source: a.source.clone(),
+                                media_type: crate::app::FileKind::Audio,
+                            },
+                            timestamp: original.origin_server_ts.as_secs().into(),
+                            event_id: Some(original.event_id.to_string()),
+                            reply_to_sender: None,
+                            reply_to_body: None,
+                            reactions: Vec::new(),
+                            reply_to_event_id_raw: reply_to_event_id,
+                        });
                     } else {
-                        body
-                    };
-                    messages.push(crate::app::DisplayMessage {
-                        sender: original.sender.to_string(),
-                        body,
-                        timestamp: original.origin_server_ts.as_secs().into(),
-                        event_id: Some(original.event_id.to_string()),
-                        reply_to_sender: None, // resolved after all messages loaded
-                        reply_to_body: None,
-                        reactions: Vec::new(),
-                        reply_to_event_id_raw: reply_to_event_id,
-                    });
+                        let body = match &original.content.msgtype {
+                            MessageType::Text(text) => text.body.clone(),
+                            MessageType::Notice(n) => n.body.clone(),
+                            MessageType::Emote(e) => format!("* {}", e.body),
+                            _ => "[unsupported message type]".to_string(),
+                        };
+                        // Strip reply fallback from body if this is a reply
+                        let body = if reply_to_event_id.is_some() {
+                            strip_reply_fallback(&body)
+                        } else {
+                            body
+                        };
+                        messages.push(crate::app::DisplayMessage {
+                            sender: original.sender.to_string(),
+                            content: crate::app::MessageContent::Text(body),
+                            timestamp: original.origin_server_ts.as_secs().into(),
+                            event_id: Some(original.event_id.to_string()),
+                            reply_to_sender: None,
+                            reply_to_body: None,
+                            reactions: Vec::new(),
+                            reply_to_event_id_raw: reply_to_event_id,
+                        });
+                    }
                 }
                 Ok(_) => {} // state events, reactions, etc — skip
                 Err(e) => {
@@ -467,7 +604,7 @@ impl Account {
                     info!("Failed to deserialize event: {}", e);
                     messages.push(crate::app::DisplayMessage {
                         sender: "".to_string(),
-                        body: "[encrypted message — unable to decrypt]".to_string(),
+                        content: crate::app::MessageContent::Text("[encrypted message — unable to decrypt]".to_string()),
                         timestamp: 0,
                         event_id: None,
                         reply_to_sender: None,
@@ -732,6 +869,39 @@ impl Account {
         Ok(())
     }
 
+    /// Download an image from the media server
+    /// Download full media content (for saving to disk or inline display)
+    pub async fn download_media(&self, source: &MediaSource) -> Result<Vec<u8>> {
+        let request = MediaRequestParameters {
+            source: source.clone(),
+            format: MediaFormat::File,
+        };
+        Ok(self.client.media().get_media_content(&request, true).await?)
+    }
+
+    /// Send a file attachment to a room
+    pub async fn send_attachment(
+        &self,
+        room_id: &OwnedRoomId,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let data = std::fs::read(path)?;
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let content_type = mime_from_extension(ext);
+        let config = matrix_sdk::attachment::AttachmentConfig::new();
+        room.send_attachment(filename, &content_type, data, config)
+            .await?;
+        Ok(())
+    }
+
     /// Send a read receipt for a message
     pub async fn send_read_receipt(
         &self,
@@ -752,19 +922,6 @@ impl Account {
         Ok(())
     }
 
-    /// Send typing notification
-    pub async fn send_typing(
-        &self,
-        room_id: &OwnedRoomId,
-        typing: bool,
-    ) -> Result<()> {
-        let room = self
-            .client
-            .get_room(room_id)
-            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
-        room.typing_notice(typing).await?;
-        Ok(())
-    }
 
     /// Get detailed room info
     pub fn get_room_details(&self, room_id: &OwnedRoomId) -> Option<RoomDetails> {

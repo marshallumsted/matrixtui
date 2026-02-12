@@ -2,8 +2,10 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use ratatui_image::StatefulImage;
 
-use crate::app::{App, Focus, Overlay, RoomSortMode, SasOverlayState};
+use crate::app::{App, FileKind, Focus, MessageContent, Overlay, RoomSortMode, SasOverlayState};
+use matrix_sdk::ruma::events::room::MediaSource;
 
 // --- Theme system ---
 
@@ -136,6 +138,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::SasVerify => draw_sas_verify_overlay(f, app),
         Overlay::EmojiPicker => draw_emoji_picker_overlay(f, app),
         Overlay::RoomInfo => draw_room_info_overlay(f, app),
+        Overlay::FileConfirm => draw_file_confirm_overlay(f, app),
         Overlay::None => {}
     }
 }
@@ -324,6 +327,43 @@ fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
+/// Build an HTTP download URL from an MXC media source (unencrypted only)
+fn media_download_url(source: &MediaSource, homeserver: &str) -> Option<String> {
+    match source {
+        MediaSource::Plain(mxc_uri) => {
+            let stripped = mxc_uri.as_str().strip_prefix("mxc://")?;
+            let hs = if homeserver.starts_with("http") {
+                homeserver.trim_end_matches('/')
+            } else {
+                return Some(format!(
+                    "https://{}/_matrix/media/v3/download/{}",
+                    homeserver, stripped
+                ));
+            };
+            Some(format!("{}/_matrix/media/v3/download/{}", hs, stripped))
+        }
+        MediaSource::Encrypted(_) => None,
+    }
+}
+
+/// Inject OSC 8 terminal hyperlink escape sequences into buffer cells
+fn inject_osc8_link(buf: &mut Buffer, x: u16, y: u16, len: u16, url: &str) {
+    if len == 0 {
+        return;
+    }
+    // Prepend OSC 8 open to the first cell
+    if let Some(cell) = buf.cell_mut(ratatui::layout::Position { x, y }) {
+        let sym = cell.symbol().to_string();
+        cell.set_symbol(&format!("\x1b]8;;{}\x07{}", url, sym));
+    }
+    // Append OSC 8 close to the last cell
+    let end_x = x + len.saturating_sub(1);
+    if let Some(cell) = buf.cell_mut(ratatui::layout::Position { x: end_x, y }) {
+        let sym = cell.symbol().to_string();
+        cell.set_symbol(&format!("{}\x1b]8;;\x07", sym));
+    }
+}
+
 fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Chat || app.focus == Focus::Input;
@@ -413,8 +453,30 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             let is_reply = msg.reply_to_sender.is_some();
             let indent = if is_reply { "    " } else { "  " };
             let sender_text = format!("{}{}", indent, msg.sender);
-            let body_text = format!("{}{}", indent, msg.body);
-            let mut msg_h = wrapped_height(&sender_text) + wrapped_height(&body_text);
+            let mut msg_h = wrapped_height(&sender_text);
+            match &msg.content {
+                MessageContent::Image { protocol, .. } => {
+                    if protocol.is_some() {
+                        msg_h += 8; // image display height
+                    } else {
+                        msg_h += 1; // loading/fallback text
+                    }
+                }
+                MessageContent::File { body, media_type, .. } => {
+                    let prefix = match media_type {
+                        FileKind::File  => "[file: ",
+                        FileKind::Video => "[video: ",
+                        FileKind::Audio => "[audio: ",
+                    };
+                    let file_text = format!("{}{}{}]", indent, prefix, body);
+                    msg_h += wrapped_height(&file_text);
+                }
+                MessageContent::Text(_) => {
+                    let body_str = msg.body_text();
+                    let body_text = format!("{}{}", indent, body_str);
+                    msg_h += wrapped_height(&body_text);
+                }
+            }
             // Reply context line (may wrap)
             if is_reply {
                 let reply_preview = format!("  \u{2514} {}: {}",
@@ -446,99 +508,199 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         let visible_msgs = &app.messages[start..end];
         let msg_count = visible_msgs.len();
 
-        let mut visible: Vec<Line> = visible_msgs
-            .iter()
-            .enumerate()
-            .flat_map(|(i, msg)| {
-                let msg_idx = start + i;
-                let is_selected = app.selected_message == Some(msg_idx);
-                let sender_style = if is_selected {
-                    Style::default()
-                        .fg(theme.accent)
-                        .bg(theme.highlight_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD)
-                };
-                let body_style = if is_selected {
-                    Style::default()
-                        .fg(theme.text)
-                        .bg(theme.highlight_bg)
-                } else {
-                    Style::default()
-                };
-                let mut lines: Vec<Line> = Vec::new();
+        // Track image positions: (line_offset, msg_index_in_visible)
+        let mut image_positions: Vec<(usize, usize)> = Vec::new();
+        // Track link positions for OSC 8: (line_offset, source, text_len)
+        let mut link_positions: Vec<(usize, MediaSource, usize)> = Vec::new();
+        let mut visible: Vec<Line> = Vec::new();
 
-                // Unread separator
-                if app.first_unread_index == Some(msg_idx) {
-                    let sep_width = inner_width.saturating_sub(4);
-                    let dashes = "\u{2500}".repeat(sep_width / 2);
-                    let sep_text = format!("{}  new  {}", dashes, dashes);
-                    lines.push(Line::from(Span::styled(
-                        sep_text,
-                        Style::default().fg(theme.status_warn),
+        for (i, msg) in visible_msgs.iter().enumerate() {
+            let msg_idx = start + i;
+            let is_selected = app.selected_message == Some(msg_idx);
+            let sender_style = if is_selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            };
+            let body_style = if is_selected {
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.highlight_bg)
+            } else {
+                Style::default()
+            };
+
+            // Unread separator
+            if app.first_unread_index == Some(msg_idx) {
+                let sep_width = inner_width.saturating_sub(4);
+                let dashes = "\u{2500}".repeat(sep_width / 2);
+                let sep_text = format!("{}  new  {}", dashes, dashes);
+                visible.push(Line::from(Span::styled(
+                    sep_text,
+                    Style::default().fg(theme.status_warn),
+                )));
+            }
+
+            // Reply context line + indented sender/body for replies
+            let is_reply = msg.reply_to_sender.is_some();
+            if let (Some(reply_sender), Some(reply_body)) =
+                (&msg.reply_to_sender, &msg.reply_to_body)
+            {
+                let reply_text = format!("  \u{2514} {}: {}", reply_sender, reply_body);
+                visible.push(Line::from(Span::styled(
+                    reply_text,
+                    Style::default()
+                        .fg(theme.text_dim)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            }
+
+            let indent = if is_reply { "    " } else { "  " };
+            let sender_text = format!("{}{}", indent, msg.sender);
+            visible.push(Line::from(Span::styled(sender_text, sender_style)));
+
+            match &msg.content {
+                MessageContent::Image { body, loading, protocol, source, .. } => {
+                    if protocol.is_some() {
+                        // Record the line offset where the image should render
+                        image_positions.push((visible.len(), msg_idx));
+                        // Reserve 8 lines for the image
+                        for _ in 0..8 {
+                            visible.push(Line::from(""));
+                        }
+                    } else if *loading {
+                        visible.push(Line::from(Span::styled(
+                            format!("{}[loading {}...]", indent, body),
+                            Style::default()
+                                .fg(theme.text_dim)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                    } else {
+                        let display_text = format!("{}[image: {}]", indent, body);
+                        let text_len = display_text.len();
+                        link_positions.push((visible.len(), source.clone(), text_len));
+                        visible.push(Line::from(Span::styled(
+                            display_text,
+                            Style::default().fg(theme.text_dim)
+                                .add_modifier(Modifier::UNDERLINED),
+                        )));
+                    }
+                }
+                MessageContent::File { body, source, media_type } => {
+                    let prefix = match media_type {
+                        FileKind::File  => "[file: ",
+                        FileKind::Video => "[video: ",
+                        FileKind::Audio => "[audio: ",
+                    };
+                    let display_text = format!("{}{}{}]", indent, prefix, body);
+                    let text_len = display_text.len();
+                    link_positions.push((visible.len(), source.clone(), text_len));
+                    visible.push(Line::from(Span::styled(
+                        display_text,
+                        Style::default().fg(theme.text_dim)
+                            .add_modifier(Modifier::UNDERLINED),
                     )));
                 }
-
-                // Reply context line + indented sender/body for replies
-                let is_reply = msg.reply_to_sender.is_some();
-                if let (Some(reply_sender), Some(reply_body)) =
-                    (&msg.reply_to_sender, &msg.reply_to_body)
-                {
-                    let reply_text = format!("  \u{2514} {}: {}", reply_sender, reply_body);
-                    lines.push(Line::from(Span::styled(
-                        reply_text,
-                        Style::default()
-                            .fg(theme.text_dim)
-                            .add_modifier(Modifier::ITALIC),
-                    )));
+                MessageContent::Text(_) => {
+                    let body_str = msg.body_text();
+                    let body_text = format!("{}{}", indent, body_str);
+                    visible.push(Line::from(Span::styled(body_text, body_style)));
                 }
+            }
 
-                let indent = if is_reply { "    " } else { "  " };
-                let sender_text = format!("{}{}", indent, msg.sender);
-                let body_text = format!("{}{}", indent, msg.body);
-                lines.push(Line::from(Span::styled(sender_text, sender_style)));
-                lines.push(Line::from(Span::styled(body_text, body_style)));
+            // Reaction line
+            if !msg.reactions.is_empty() {
+                let reaction_text: String = msg
+                    .reactions
+                    .iter()
+                    .map(|(emoji, count)| {
+                        if *count > 1 {
+                            format!("{} {} ", emoji, count)
+                        } else {
+                            format!("{} ", emoji)
+                        }
+                    })
+                    .collect();
+                visible.push(Line::from(Span::styled(
+                    format!("  {}", reaction_text.trim_end()),
+                    Style::default().fg(theme.text_dim),
+                )));
+            }
 
-                // Reaction line
-                if !msg.reactions.is_empty() {
-                    let reaction_text: String = msg
-                        .reactions
-                        .iter()
-                        .map(|(emoji, count)| {
-                            if *count > 1 {
-                                format!("{} {} ", emoji, count)
-                            } else {
-                                format!("{} ", emoji)
-                            }
-                        })
-                        .collect();
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", reaction_text.trim_end()),
-                        Style::default().fg(theme.text_dim),
-                    )));
-                }
-
-                // Add separator after every message except the last
-                if i + 1 < msg_count {
-                    lines.push(Line::from(""));
-                }
-                lines
-            })
-            .collect();
+            // Add separator after every message except the last
+            if i + 1 < msg_count {
+                visible.push(Line::from(""));
+            }
+        }
 
         // Bottom-align: pad top with empty lines so messages anchor to the bottom
-        if used_height < msg_height {
+        let top_padding = if used_height < msg_height {
             let padding = msg_height - used_height;
             let mut padded = vec![Line::from(""); padding];
+            let pad_count = padded.len();
             padded.append(&mut visible);
             visible = padded;
-        }
+            pad_count
+        } else {
+            0
+        };
 
         let messages = Paragraph::new(visible).block(msg_block).wrap(Wrap { trim: false });
         f.render_widget(messages, msg_area);
+
+        // Render StatefulImage widgets as overlays at tracked positions
+        let inner_area = Rect::new(
+            msg_area.x + 1,
+            msg_area.y + 1,
+            msg_area.width.saturating_sub(2),
+            msg_area.height.saturating_sub(2),
+        );
+        for (line_offset, msg_idx) in &image_positions {
+            if let Some(msg) = app.messages.get(*msg_idx) {
+                if let MessageContent::Image { protocol: Some(ref proto), .. } = msg.content {
+                    let y_offset = (*line_offset + top_padding) as u16;
+                    if y_offset < inner_area.height {
+                        let img_height = 8u16.min(inner_area.height.saturating_sub(y_offset));
+                        let img_area = Rect::new(
+                            inner_area.x + 2, // indent
+                            inner_area.y + y_offset,
+                            inner_area.width.saturating_sub(4),
+                            img_height,
+                        );
+                        if let Ok(mut guard) = proto.lock() {
+                            let image_widget = StatefulImage::default();
+                            f.render_stateful_widget(image_widget, img_area, &mut *guard);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Inject OSC 8 hyperlinks for media messages (unencrypted only)
+        let homeserver = app.active_account_id.as_ref()
+            .and_then(|id| app.accounts.iter().find(|a| &a.user_id == id))
+            .map(|a| a.homeserver.as_str())
+            .unwrap_or("");
+
+        for (line_offset, source, text_len) in &link_positions {
+            if let Some(url) = media_download_url(source, homeserver) {
+                let y = inner_area.y + (*line_offset + top_padding) as u16;
+                if y < inner_area.bottom() {
+                    inject_osc8_link(
+                        f.buffer_mut(),
+                        inner_area.x,
+                        y,
+                        (*text_len as u16).min(inner_area.width),
+                        &url,
+                    );
+                }
+            }
+        }
     }
 
     // Typing indicator
@@ -1668,10 +1830,11 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
     let preview_max = ((f.area().width as usize) * 50 / 100).saturating_sub(10);
     let msg_preview = msg
         .map(|m| {
-            let preview = if m.body.len() > preview_max && preview_max > 3 {
-                format!("{}...", &m.body[..preview_max.saturating_sub(3)])
+            let body = m.body_text();
+            let preview = if body.len() > preview_max && preview_max > 3 {
+                format!("{}...", &body[..preview_max.saturating_sub(3)])
             } else {
-                m.body.clone()
+                body.to_string()
             };
             format!("{}: {}", m.sender, preview)
         })
@@ -1681,11 +1844,11 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         // Edit mode: show text editor with wrapping
         // Use percentage-based width, compute inner width from actual area
         let base_width = (f.area().width * 60 / 100).max(20).min(f.area().width);
-        let text_inner_width = (base_width as usize).saturating_sub(2 + 2); // borders + 2-char padding
+        let text_inner_width = (base_width as usize).saturating_sub(2); // borders only ("  " prefix is text content)
         let text_lines = if text_inner_width == 0 {
             1
         } else {
-            let len = app.message_edit_text.len();
+            let len = app.message_edit_text.chars().count() + 2; // +2 for "  " prefix
             if len == 0 { 1 } else { (len + text_inner_width - 1) / text_inner_width }
         };
         let edit_area_lines = text_lines.clamp(1, 10) as u16;
@@ -1734,11 +1897,11 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
             rows[4],
         );
 
-        // Calculate cursor position accounting for wrapping
-        let cursor_offset = app.message_edit_cursor;
+        // Calculate cursor position accounting for wrapping (use char count, not bytes)
+        let cursor_char_pos = app.message_edit_text[..app.message_edit_cursor].chars().count();
         let chars_per_row = text_inner_width.max(1);
-        // +2 for the "  " prefix padding
-        let effective_offset = cursor_offset + 2;
+        // +2 for the "  " prefix
+        let effective_offset = cursor_char_pos + 2;
         let cursor_row = effective_offset / chars_per_row;
         let cursor_col = effective_offset % chars_per_row;
         let cursor_x = rows[4].x + cursor_col as u16;
@@ -1768,9 +1931,11 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
             );
         }
     } else {
-        // Action menu: Edit / Delete
+        // Action menu: dynamic based on content type
+        let actions = app.message_action_labels();
+        let action_count = actions.len() as u16;
         let err_lines: u16 = if app.message_edit_error.is_some() { 1 } else { 0 };
-        let height = (9 + err_lines).min(f.area().height);
+        let height = (5 + action_count + 2 + err_lines).min(f.area().height);
         let area = centered_rect(50, height, f.area());
         f.render_widget(Clear, area);
 
@@ -1782,17 +1947,20 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        let mut constraints: Vec<Constraint> = vec![
+            Constraint::Length(1), // padding
+            Constraint::Length(1), // message preview
+            Constraint::Length(1), // padding
+        ];
+        for _ in 0..action_count {
+            constraints.push(Constraint::Length(1)); // action row
+        }
+        constraints.push(Constraint::Length(1)); // padding
+        constraints.push(Constraint::Min(1));    // error or hint
+
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // padding
-                Constraint::Length(1), // message preview
-                Constraint::Length(1), // padding
-                Constraint::Length(1), // Edit option
-                Constraint::Length(1), // Delete option
-                Constraint::Length(1), // padding
-                Constraint::Min(1),   // error or hint
-            ])
+            .constraints(constraints)
             .split(inner);
 
         f.render_widget(
@@ -1802,18 +1970,18 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
             rows[1],
         );
 
-        let actions = ["Edit Message", "Delete Message"];
         for (i, action) in actions.iter().enumerate() {
             let is_sel = app.message_action_selected == i;
+            let is_delete = *action == "Delete Message";
             let prefix = if is_sel { "  > " } else { "    " };
             let style = if is_sel {
-                let fg = if i == 1 { theme.status_err } else { theme.text };
+                let fg = if is_delete { theme.status_err } else { theme.text };
                 Style::default()
                     .fg(fg)
                     .bg(theme.highlight_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                let fg = if i == 1 { theme.status_err } else { theme.text_dim };
+                let fg = if is_delete { theme.status_err } else { theme.text_dim };
                 Style::default().fg(fg)
             };
             f.render_widget(
@@ -1822,19 +1990,20 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
             );
         }
 
+        let hint_row = 3 + actions.len() + 1;
         if let Some(err) = &app.message_edit_error {
             f.render_widget(
                 Paragraph::new(format!("  {}", err))
                     .style(Style::default().fg(theme.status_err))
                     .wrap(Wrap { trim: false }),
-                rows[6],
+                rows[hint_row],
             );
         } else {
             f.render_widget(
                 Paragraph::new("  Enter: select  Esc: cancel")
                     .style(Style::default().fg(theme.dimmed))
                     .wrap(Wrap { trim: false }),
-                rows[6],
+                rows[hint_row],
             );
         }
     }
@@ -2226,6 +2395,68 @@ fn draw_room_info_overlay(f: &mut Frame, app: &App) {
 
     let content = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(content, inner);
+}
+
+fn draw_file_confirm_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let path_str = app.pending_file_drop.as_deref().unwrap_or("");
+    let filename = std::path::Path::new(path_str)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path_str);
+
+    // File size
+    let size_label = std::fs::metadata(path_str)
+        .map(|m| {
+            let bytes = m.len();
+            if bytes >= 1_048_576 {
+                format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+            } else if bytes >= 1024 {
+                format!("{:.1} KB", bytes as f64 / 1024.0)
+            } else {
+                format!("{} B", bytes)
+            }
+        })
+        .unwrap_or_default();
+
+    let height: u16 = 7;
+    let area = centered_rect(50, height, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Send File ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // padding
+            Constraint::Length(1), // filename
+            Constraint::Length(1), // padding
+            Constraint::Length(1), // hint
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let file_info = if size_label.is_empty() {
+        format!("  {}", filename)
+    } else {
+        format!("  {} ({})", filename, size_label)
+    };
+    f.render_widget(
+        Paragraph::new(file_info).style(Style::default().fg(theme.text)),
+        rows[1],
+    );
+
+    f.render_widget(
+        Paragraph::new("  Enter: send    Esc: cancel")
+            .style(Style::default().fg(theme.dimmed)),
+        rows[3],
+    );
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

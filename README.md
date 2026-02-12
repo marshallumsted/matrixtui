@@ -26,6 +26,7 @@ Run with `mtui`. To update, run the same command again.
 | `Enter` | Select room / send message |
 | `Ctrl+K` | Quick room switcher |
 | `?` | Help |
+| `Ctrl+U` | Upload / attach file |
 | `Ctrl+Q` | Quit |
 
 ## Config
@@ -105,14 +106,17 @@ Recommended: set restrictive permissions on both directories (`chmod 700`). If y
 | Profile editing (display name, avatar) | Supported |
 | Fuzzy room search | Supported (`Ctrl+K`) |
 | Responsive layout (3/2/1 column) | Supported |
-| Image / file messages | Display only (shows `[image]`, `[file: name]`) |
+| Inline image viewing | Supported (Sixel/Kitty/halfblock, async download) |
+| File / video / audio messages | Supported (display + download via action menu) |
+| File upload / attachment | Supported (`Ctrl+U`, native file picker) |
+| Drag-and-drop file send | Supported (bracketed paste detection, confirm overlay) |
+| Media download | Supported (saves to ~/Downloads via action menu) |
+| Clickable media links | Supported (OSC 8 terminal hyperlinks, unencrypted rooms) |
 
 ## To Be Implemented
 
 | Feature | Notes |
 |---------|-------|
-| Image / file preview | Inline rendering via sixel/kitty protocol |
-| File upload from TUI | Send images and files from local path |
 | Threads | Matrix threading support |
 | Message search | Search within room or across rooms |
 | Room directory | Browse and join public rooms |

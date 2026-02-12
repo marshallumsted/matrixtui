@@ -1,11 +1,13 @@
 use crossterm::event::{self, Event, KeyEvent};
+use matrix_sdk::ruma::OwnedRoomId;
+use ratatui_image::protocol::StatefulProtocol;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::account::MatrixEvent;
 
 /// All events the app loop handles
-#[derive(Debug)]
 pub enum AppEvent {
     /// A key was pressed
     Key(KeyEvent),
@@ -13,6 +15,14 @@ pub enum AppEvent {
     Resize,
     /// A Matrix event from any account
     Matrix(MatrixEvent),
+    /// Bracketed paste data
+    Paste(String),
+    /// An image has been downloaded and decoded, ready for display
+    ImageReady {
+        room_id: OwnedRoomId,
+        event_id: String,
+        protocol: Arc<Mutex<StatefulProtocol>>,
+    },
     /// Tick for periodic UI refresh
     Tick,
 }
@@ -29,6 +39,9 @@ pub fn spawn_input_reader(tx: mpsc::UnboundedSender<AppEvent>) {
                     }
                     Ok(Event::Resize(_, _)) => {
                         let _ = tx.send(AppEvent::Resize);
+                    }
+                    Ok(Event::Paste(data)) => {
+                        let _ = tx.send(AppEvent::Paste(data));
                     }
                     _ => {}
                 }
