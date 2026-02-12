@@ -393,7 +393,11 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         };
         let start = end.saturating_sub(msgs_per_page);
 
-        let mut visible: Vec<Line> = app.messages[start..end]
+        let visible_msgs = &app.messages[start..end];
+        let msg_count = visible_msgs.len();
+        let inner_width = msg_area.width.saturating_sub(2) as usize; // borders
+
+        let mut visible: Vec<Line> = visible_msgs
             .iter()
             .enumerate()
             .flat_map(|(i, msg)| {
@@ -416,24 +420,29 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default()
                 };
-                vec![
-                    Line::from(Span::styled(
-                        format!("  {}", msg.sender),
-                        sender_style,
-                    )),
-                    Line::from(Span::styled(
-                        format!("  {}", msg.body),
-                        body_style,
-                    )),
-                    Line::from(""),
-                ]
+                let sender_text = format!("  {}", msg.sender);
+                let body_text = format!("  {}", msg.body);
+                let mut lines = vec![
+                    Line::from(Span::styled(sender_text, sender_style)),
+                    Line::from(Span::styled(body_text, body_style)),
+                ];
+                // Add separator after every message except the last
+                if i + 1 < msg_count {
+                    lines.push(Line::from(""));
+                }
+                lines
             })
             .collect();
 
+        // Calculate actual rendered height accounting for line wrapping
+        let rendered_height: usize = visible.iter().map(|line| {
+            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if inner_width == 0 { 1 } else { (line_width.max(1) + inner_width - 1) / inner_width }
+        }).sum();
+
         // Bottom-align: pad top with empty lines so messages anchor to the bottom
-        let content_lines = visible.len();
-        if content_lines < msg_height {
-            let padding = msg_height - content_lines;
+        if rendered_height < msg_height {
+            let padding = msg_height - rendered_height;
             let mut padded = vec![Line::from(""); padding];
             padded.append(&mut visible);
             visible = padded;
