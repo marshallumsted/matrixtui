@@ -1850,8 +1850,7 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         let w = widget_width.max(1);
         let text_lines = if full_chars.is_empty() { 1 } else { (full_chars.len() + w - 1) / w };
         let edit_area_lines = text_lines.clamp(1, 10) as u16;
-        let err_lines: u16 = if app.message_edit_error.is_some() { 2 } else { 0 };
-        let height = (6 + edit_area_lines + err_lines).min(f.area().height);
+        let height = (8 + edit_area_lines).min(f.area().height);
         let area = centered_rect(60, height, f.area());
         f.render_widget(Clear, area);
 
