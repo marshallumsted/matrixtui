@@ -454,6 +454,26 @@ impl Account {
         let room = self.client.get_room(room_id)?;
         room.topic()
     }
+
+    /// Recover E2EE secrets using a recovery key (or passphrase)
+    pub async fn recover_with_key(&self, recovery_key: &str) -> Result<()> {
+        self.client
+            .encryption()
+            .recovery()
+            .recover(recovery_key)
+            .await?;
+        Ok(())
+    }
+
+    /// Check if session has complete cross-signing keys
+    pub async fn is_verified(&self) -> bool {
+        self.client
+            .encryption()
+            .cross_signing_status()
+            .await
+            .map(|s| s.is_complete())
+            .unwrap_or(false)
+    }
 }
 
 fn mime_from_extension(ext: &str) -> mime::Mime {

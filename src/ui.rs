@@ -131,6 +131,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::ProfileEditor => draw_profile_overlay(f, app),
         Overlay::RoomCreator => draw_creator_overlay(f, app),
         Overlay::RoomEditor => draw_editor_overlay(f, app),
+        Overlay::Recovery => draw_recovery_overlay(f, app),
         Overlay::None => {}
     }
 }
@@ -660,7 +661,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     if app.settings_accounts_open {
         content_lines += 1 + app.accounts.len() as u16; // Add Account + each account
         if app.settings_account_action_open {
-            content_lines += 2; // Reconnect + Remove
+            content_lines += 4; // Reconnect + Remove + Edit Profile + Verify Session
         }
     }
     if app.settings_theme_open {
@@ -757,7 +758,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
 
             // Action menu for this account
             if is_action_target {
-                let actions = ["Reconnect", "Remove Account", "Edit Profile"];
+                let actions = ["Reconnect", "Remove Account", "Edit Profile", "Verify Session"];
                 for (j, action) in actions.iter().enumerate() {
                     let is_action_sel = app.settings_account_action_selected == j;
                     let action_prefix = if is_action_sel {
@@ -1287,6 +1288,89 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
         };
         f.set_cursor_position((col, row));
     }
+}
+
+fn draw_recovery_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = centered_rect(50, 12, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Verify Session ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // padding
+            Constraint::Length(1), // account id
+            Constraint::Length(1), // padding
+            Constraint::Length(1), // label
+            Constraint::Length(1), // input field
+            Constraint::Length(1), // padding
+            Constraint::Length(1), // error or hint
+            Constraint::Length(1), // hint
+        ])
+        .split(inner);
+
+    // Account ID
+    let account_label = if app.recovery_account_idx < app.accounts.len() {
+        app.accounts[app.recovery_account_idx].user_id.clone()
+    } else {
+        String::new()
+    };
+    f.render_widget(
+        Paragraph::new(format!("  {}", account_label))
+            .style(Style::default().fg(theme.accent)),
+        rows[1],
+    );
+
+    // Label
+    f.render_widget(
+        Paragraph::new("  Recovery Key:").style(Style::default().fg(theme.text_dim)),
+        rows[3],
+    );
+
+    // Input field
+    let display_val = if app.recovery_key.is_empty() {
+        " ".to_string()
+    } else {
+        app.recovery_key.clone()
+    };
+    f.render_widget(
+        Paragraph::new(format!("  {}", display_val)).style(field_style(true, theme)),
+        rows[4],
+    );
+
+    // Cursor
+    let cursor_x = inner.x + 2 + app.recovery_key.len() as u16;
+    f.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), rows[4].y));
+
+    // Error or busy
+    if app.recovery_busy {
+        f.render_widget(
+            Paragraph::new("  Verifying...").style(Style::default().fg(theme.status_warn)),
+            rows[6],
+        );
+    } else if let Some(err) = &app.recovery_error {
+        let truncated: String = err.chars().take((inner.width as usize).saturating_sub(4)).collect();
+        f.render_widget(
+            Paragraph::new(format!("  {}", truncated))
+                .style(Style::default().fg(theme.status_err)),
+            rows[6],
+        );
+    }
+
+    // Hint
+    f.render_widget(
+        Paragraph::new("  Enter: verify   Esc: cancel")
+            .style(Style::default().fg(theme.dimmed)),
+        rows[7],
+    );
 }
 
 fn field_style(focused: bool, theme: &Theme) -> Style {

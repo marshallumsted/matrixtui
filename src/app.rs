@@ -72,6 +72,7 @@ pub enum Overlay {
     ProfileEditor,
     RoomCreator,
     RoomEditor,
+    Recovery,
 }
 
 /// A message stored for display
@@ -167,6 +168,12 @@ pub struct App {
     pub editor_room_id: Option<OwnedRoomId>,
     pub editor_account_id: Option<String>,
 
+    // Recovery overlay state
+    pub recovery_key: String,
+    pub recovery_error: Option<String>,
+    pub recovery_busy: bool,
+    pub recovery_account_idx: usize,
+
     // Active theme
     pub theme: ui::Theme,
 
@@ -250,6 +257,10 @@ impl App {
             editor_confirm_delete: false,
             editor_room_id: None,
             editor_account_id: None,
+            recovery_key: String::new(),
+            recovery_error: None,
+            recovery_busy: false,
+            recovery_account_idx: 0,
             theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
@@ -369,6 +380,7 @@ impl App {
             Overlay::ProfileEditor => self.handle_profile_key(key).await,
             Overlay::RoomCreator => self.handle_creator_key(key).await,
             Overlay::RoomEditor => self.handle_editor_key(key).await,
+            Overlay::Recovery => self.handle_recovery_key(key).await,
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
@@ -964,6 +976,58 @@ impl App {
         self.profile_busy = false;
     }
 
+    fn open_recovery(&mut self, account_idx: usize) {
+        self.recovery_account_idx = account_idx;
+        self.recovery_key.clear();
+        self.recovery_error = None;
+        self.recovery_busy = false;
+        self.overlay = Overlay::Recovery;
+    }
+
+    async fn handle_recovery_key(&mut self, key: KeyEvent) {
+        if self.recovery_busy {
+            return;
+        }
+        match key.code {
+            KeyCode::Enter => {
+                if !self.recovery_key.is_empty() {
+                    self.do_recover().await;
+                }
+            }
+            KeyCode::Char(c) => {
+                self.recovery_key.push(c);
+            }
+            KeyCode::Backspace => {
+                self.recovery_key.pop();
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::Settings;
+            }
+            _ => {}
+        }
+    }
+
+    async fn do_recover(&mut self) {
+        let idx = self.recovery_account_idx;
+        if idx >= self.accounts.len() {
+            return;
+        }
+        self.recovery_busy = true;
+        self.recovery_error = None;
+        let key = self.recovery_key.trim().to_string();
+        match self.accounts[idx].recover_with_key(&key).await {
+            Ok(()) => {
+                let user_id = &self.accounts[idx].user_id;
+                self.status_msg = format!("Session verified for {}", user_id);
+                self.overlay = Overlay::None;
+            }
+            Err(e) => {
+                self.recovery_error = Some(e.to_string());
+            }
+        }
+        self.recovery_busy = false;
+    }
+
     fn handle_chat_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up => {
@@ -1142,7 +1206,7 @@ impl App {
             }
             KeyCode::Down => {
                 if self.settings_account_action_open {
-                    if self.settings_account_action_selected < 2 {
+                    if self.settings_account_action_selected < 3 {
                         self.settings_account_action_selected += 1;
                     }
                 } else if self.settings_accounts_open {
@@ -1186,6 +1250,11 @@ impl App {
                             // Edit Profile
                             self.settings_account_action_open = false;
                             self.open_profile_editor(acct_idx).await;
+                        }
+                        3 => {
+                            // Verify Session
+                            self.settings_account_action_open = false;
+                            self.open_recovery(acct_idx);
                         }
                         _ => {}
                     }
