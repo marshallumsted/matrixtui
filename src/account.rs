@@ -57,6 +57,10 @@ pub enum MatrixEvent {
         user_id: String,
         flow_id: String,
     },
+    SasStarted {
+        flow_id: String,
+        sas: SasVerification,
+    },
     SasEmojis {
         flow_id: String,
         emojis: Vec<(String, String)>, // (symbol, description)
@@ -671,8 +675,50 @@ impl Account {
         flow_id: String,
     ) {
         tokio::spawn(async move {
+            // Check current state first — the request may already be ready
+            // before we start listening to the stream
+            let current = request.state();
+            info!("Verification request initial state: {:?}", &current);
+            match current {
+                VerificationRequestState::Ready { .. } => {
+                    info!("Request already ready, starting SAS immediately");
+                    match request.start_sas().await {
+                        Ok(Some(sas)) => {
+                            sas.accept().await.ok();
+                            let _ = tx.send(MatrixEvent::SasStarted {
+                                flow_id: flow_id.clone(),
+                                sas: sas.clone(),
+                            });
+                            Self::spawn_sas_watcher(sas, tx, flow_id);
+                        }
+                        Ok(None) => {
+                            let _ = tx.send(MatrixEvent::SasCancelled {
+                                flow_id,
+                                reason: "Failed to start SAS".to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(MatrixEvent::SasCancelled {
+                                flow_id,
+                                reason: e.to_string(),
+                            });
+                        }
+                    }
+                    return;
+                }
+                VerificationRequestState::Done | VerificationRequestState::Cancelled(_) => {
+                    let _ = tx.send(MatrixEvent::SasCancelled {
+                        flow_id,
+                        reason: "Request already finished".to_string(),
+                    });
+                    return;
+                }
+                _ => {} // Not ready yet, fall through to stream
+            }
+
             let mut changes = request.changes();
             while let Some(state) = changes.next().await {
+                info!("Verification request state change: {:?}", &state);
                 match state {
                     VerificationRequestState::Ready { .. } => {
                         // Other device accepted — start the SAS flow
@@ -680,6 +726,10 @@ impl Account {
                         match request.start_sas().await {
                             Ok(Some(sas)) => {
                                 sas.accept().await.ok();
+                                let _ = tx.send(MatrixEvent::SasStarted {
+                                    flow_id: flow_id.clone(),
+                                    sas: sas.clone(),
+                                });
                                 let fid = flow_id.clone();
                                 Self::spawn_sas_watcher(sas, tx.clone(), fid);
                                 break;
@@ -704,6 +754,10 @@ impl Account {
                         // Other side started SAS directly
                         if let Some(sas) = verification.sas() {
                             sas.accept().await.ok();
+                            let _ = tx.send(MatrixEvent::SasStarted {
+                                flow_id: flow_id.clone(),
+                                sas: sas.clone(),
+                            });
                             let fid = flow_id.clone();
                             Self::spawn_sas_watcher(sas, tx.clone(), fid);
                         }

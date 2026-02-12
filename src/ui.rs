@@ -125,7 +125,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Draw overlays on top
     match app.overlay {
         Overlay::Login => draw_login_overlay(f, app),
-        Overlay::Help => draw_help_overlay(f, &app.theme),
+        Overlay::Help => draw_help_overlay(f, app),
         Overlay::RoomSwitcher => draw_switcher_overlay(f, app),
         Overlay::Settings => draw_settings_overlay(f, app),
         Overlay::ProfileEditor => draw_profile_overlay(f, app),
@@ -531,7 +531,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_login_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 14, f.area());
+    let base_width = (f.area().width * 50 / 100).min(f.area().width);
+    let err_lines: u16 = if let Some(err) = &app.login_error {
+        let avail = base_width.saturating_sub(4) as usize;
+        if avail == 0 { 1 } else { ((err.len() / avail) + 1).min(3) as u16 }
+    } else {
+        1
+    };
+    let height = (11 + err_lines).min(f.area().height);
+
+    let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -544,7 +553,6 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
 
     let fields = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
             Constraint::Length(1), // label
             Constraint::Length(1), // homeserver
@@ -555,7 +563,7 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
             Constraint::Length(1), // label
             Constraint::Length(1), // password
             Constraint::Length(1), // spacer
-            Constraint::Length(1), // error or hint
+            Constraint::Min(1),   // error or hint (wrapping)
         ])
         .split(inner);
 
@@ -585,7 +593,7 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
         Paragraph::new("Password:").style(Style::default().fg(theme.text_dim)),
         fields[6],
     );
-    let masked: String = "●".repeat(app.login_password.len());
+    let masked: String = "\u{25cf}".repeat(app.login_password.len());
     f.render_widget(
         Paragraph::new(format!(" {}", masked)).style(pw_style),
         fields[7],
@@ -593,12 +601,17 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
 
     // Error or hint
     let hint = if let Some(err) = &app.login_error {
-        Paragraph::new(err.as_str()).style(Style::default().fg(theme.status_err))
+        Paragraph::new(err.as_str())
+            .style(Style::default().fg(theme.status_err))
+            .wrap(Wrap { trim: false })
     } else if app.login_busy {
-        Paragraph::new("Logging in...").style(Style::default().fg(theme.status_warn))
+        Paragraph::new("Logging in...")
+            .style(Style::default().fg(theme.status_warn))
+            .wrap(Wrap { trim: false })
     } else {
-        Paragraph::new("Tab: next field  Enter: login  Esc: cancel")
+        Paragraph::new("Tab: next  Enter: login  Esc: cancel")
             .style(Style::default().fg(theme.dimmed))
+            .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[9]);
 
@@ -614,14 +627,9 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
-    let area = centered_rect(60, 26, f.area());
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(" Help ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent));
+fn draw_help_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let term = f.area();
 
     let help_text = vec![
         "",
@@ -652,14 +660,41 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         "    Home/End         Jump to oldest / newest",
     ];
 
-    let text: Vec<Line> = help_text.iter().map(|&s| Line::from(s)).collect();
-    let paragraph = Paragraph::new(text).block(block);
-    f.render_widget(paragraph, area);
+    let content_height = help_text.len() as u16;
+    let height = (content_height + 2).min(term.height); // +2 for borders
+
+    let area = centered_rect(60, height, term);
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Help (\u{2191}/\u{2193} scroll) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let visible_height = inner.height as usize;
+    let max_scroll = (help_text.len()).saturating_sub(visible_height);
+    let scroll = app.help_scroll.min(max_scroll);
+
+    let visible_lines: Vec<Line> = help_text
+        .iter()
+        .skip(scroll)
+        .take(visible_height)
+        .map(|&s| Line::from(s))
+        .collect();
+
+    let paragraph = Paragraph::new(visible_lines);
+    f.render_widget(paragraph, inner);
 }
 
 fn draw_switcher_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 12, f.area());
+    let filtered_count = app.filtered_rooms().len() as u16;
+    let result_rows = filtered_count.clamp(1, 8);
+    let height = (result_rows + 4).min(f.area().height); // +2 search+separator, +2 borders
+    let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -728,7 +763,10 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     if app.settings_accounts_open {
         content_lines += 1 + app.accounts.len() as u16; // Add Account + each account
         if app.settings_account_action_open {
-            content_lines += 5; // Reconnect + Remove + Edit Profile + Recovery Key + Verify from Device
+            content_lines += 4; // Reconnect + Remove + Edit Profile + Verify Session
+            if app.settings_verify_open {
+                content_lines += 2; // Recovery Key + Another Device
+            }
         }
     }
     if app.settings_theme_open {
@@ -737,7 +775,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     if app.settings_sort_open {
         content_lines += RoomSortMode::ALL.len() as u16;
     }
-    let height = content_lines + 2; // +2 for borders
+    let height = (content_lines + 2).min(f.area().height); // +2 for borders, cap to terminal
 
     let area = centered_rect(60, height, f.area());
     f.render_widget(Clear, area);
@@ -825,18 +863,24 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
 
             // Action menu for this account
             if is_action_target {
-                let actions = ["Reconnect", "Remove Account", "Edit Profile", "Recovery Key", "Verify from Device"];
+                let actions = ["Reconnect", "Remove Account", "Edit Profile", "Verify Session"];
                 for (j, action) in actions.iter().enumerate() {
-                    let is_action_sel = app.settings_account_action_selected == j;
+                    let is_action_sel = !app.settings_verify_open
+                        && app.settings_account_action_selected == j;
+                    let is_verify_parent = app.settings_verify_open
+                        && app.settings_account_action_selected == 3
+                        && j == 3;
                     let action_prefix = if is_action_sel {
                         "          > "
+                    } else if is_verify_parent {
+                        "          \u{25b8} "
                     } else {
                         "            "
                     };
-                    let action_style = if is_action_sel {
+                    let action_style = if is_action_sel || is_verify_parent {
                         Style::default()
                             .fg(if j == 1 { theme.status_err } else { theme.text })
-                            .bg(theme.highlight_bg)
+                            .bg(if is_verify_parent { Color::Reset } else { theme.highlight_bg })
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(if j == 1 { theme.status_err } else { theme.text_dim })
@@ -845,6 +889,31 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
                         format!("{}{}", action_prefix, action),
                         action_style,
                     )));
+
+                    // Verify Session sub-menu
+                    if j == 3 && app.settings_verify_open {
+                        let verify_actions = ["Recovery Key", "Another Device"];
+                        for (k, vaction) in verify_actions.iter().enumerate() {
+                            let is_vsel = app.settings_verify_selected == k;
+                            let vprefix = if is_vsel {
+                                "              > "
+                            } else {
+                                "                "
+                            };
+                            let vstyle = if is_vsel {
+                                Style::default()
+                                    .fg(theme.text)
+                                    .bg(theme.highlight_bg)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(theme.text_dim)
+                            };
+                            lines.push(Line::from(Span::styled(
+                                format!("{}{}", vprefix, vaction),
+                                vstyle,
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -987,7 +1056,9 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
 
 fn draw_profile_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 18, f.area());
+    let err_lines: u16 = if app.profile_error.is_some() { 2 } else { 1 };
+    let height = (15 + err_lines).min(f.area().height);
+    let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1000,7 +1071,6 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
 
     let fields = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
             Constraint::Length(1), // user id
             Constraint::Length(1), // current name
@@ -1015,7 +1085,7 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
             Constraint::Length(1), // label
             Constraint::Length(1), // avatar path field
             Constraint::Length(1), // spacer
-            Constraint::Length(1), // error/hint
+            Constraint::Min(1),   // error/hint (wrapping)
         ])
         .split(inner);
 
@@ -1033,8 +1103,9 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
             .style(Style::default().fg(theme.text_dim)),
         fields[1],
     );
-    let avatar_display = if app.profile_current_avatar.len() > 40 {
-        format!("{}...", &app.profile_current_avatar[..37])
+    let max_avatar = (inner.width as usize).saturating_sub(12); // "  Avatar: " + margin
+    let avatar_display = if app.profile_current_avatar.len() > max_avatar && max_avatar > 3 {
+        format!("{}...", &app.profile_current_avatar[..max_avatar.saturating_sub(3)])
     } else {
         app.profile_current_avatar.clone()
     };
@@ -1074,12 +1145,17 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
     );
 
     let hint = if let Some(err) = &app.profile_error {
-        Paragraph::new(format!("  {}", err)).style(Style::default().fg(theme.status_err))
+        Paragraph::new(format!("  {}", err))
+            .style(Style::default().fg(theme.status_err))
+            .wrap(Wrap { trim: false })
     } else if app.profile_busy {
-        Paragraph::new("  Working...").style(Style::default().fg(theme.status_warn))
+        Paragraph::new("  Working...")
+            .style(Style::default().fg(theme.status_warn))
+            .wrap(Wrap { trim: false })
     } else {
-        Paragraph::new("  Tab: next   Enter: apply field   Esc: back")
+        Paragraph::new("  Tab: next  Enter: apply  Esc: back")
             .style(Style::default().fg(theme.dimmed))
+            .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[13]);
 
@@ -1096,7 +1172,9 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
 
 fn draw_creator_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 20, f.area());
+    let err_lines: u16 = if app.creator_error.is_some() { 2 } else { 1 };
+    let height = (17 + err_lines).min(f.area().height);
+    let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1109,7 +1187,6 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
 
     let fields = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
             Constraint::Length(1), // account selector
             Constraint::Length(1), // spacer
@@ -1126,7 +1203,7 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
             Constraint::Length(1), // label
             Constraint::Length(1), // invite field
             Constraint::Length(1), // spacer
-            Constraint::Length(1), // error/hint
+            Constraint::Min(1),   // error/hint (wrapping)
         ])
         .split(inner);
 
@@ -1212,12 +1289,17 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
     );
 
     let hint = if let Some(err) = &app.creator_error {
-        Paragraph::new(format!("  {}", err)).style(Style::default().fg(theme.status_err))
+        Paragraph::new(format!("  {}", err))
+            .style(Style::default().fg(theme.status_err))
+            .wrap(Wrap { trim: false })
     } else if app.creator_busy {
-        Paragraph::new("  Creating room...").style(Style::default().fg(theme.status_warn))
+        Paragraph::new("  Creating room...")
+            .style(Style::default().fg(theme.status_warn))
+            .wrap(Wrap { trim: false })
     } else {
         Paragraph::new("  Tab: next  Space: toggle  Enter: create  Esc: cancel")
             .style(Style::default().fg(theme.dimmed))
+            .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[15]);
 
@@ -1234,7 +1316,9 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
 
 fn draw_editor_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 19, f.area());
+    let err_lines: u16 = if app.editor_error.is_some() { 2 } else { 1 };
+    let height = (16 + err_lines).min(f.area().height);
+    let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1247,7 +1331,6 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
 
     let fields = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
             Constraint::Length(1), // room header
             Constraint::Length(1), // spacer
@@ -1263,7 +1346,7 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
             Constraint::Length(1), // leave button
             Constraint::Length(1), // delete button
             Constraint::Length(1), // spacer
-            Constraint::Length(1), // error/hint
+            Constraint::Min(1),   // error/hint (wrapping)
         ])
         .split(inner);
 
@@ -1355,12 +1438,17 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(delete_text).style(delete_style), fields[12]);
 
     let hint = if let Some(err) = &app.editor_error {
-        Paragraph::new(format!("  {}", err)).style(Style::default().fg(theme.status_err))
+        Paragraph::new(format!("  {}", err))
+            .style(Style::default().fg(theme.status_err))
+            .wrap(Wrap { trim: false })
     } else if app.editor_busy {
-        Paragraph::new("  Working...").style(Style::default().fg(theme.status_warn))
+        Paragraph::new("  Working...")
+            .style(Style::default().fg(theme.status_warn))
+            .wrap(Wrap { trim: false })
     } else {
-        Paragraph::new("  Tab: next   Enter: apply/confirm   Esc: back")
+        Paragraph::new("  Tab: next  Enter: apply  Esc: back")
             .style(Style::default().fg(theme.dimmed))
+            .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[14]);
 
@@ -1463,8 +1551,9 @@ fn draw_recovery_overlay(f: &mut Frame, app: &App) {
 
     // Hint
     f.render_widget(
-        Paragraph::new("  Enter: verify   Esc: cancel")
-            .style(Style::default().fg(theme.dimmed)),
+        Paragraph::new("  Enter: verify  Esc: cancel")
+            .style(Style::default().fg(theme.dimmed))
+            .wrap(Wrap { trim: false }),
         rows[7],
     );
 }
@@ -1476,10 +1565,11 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         .selected_message
         .and_then(|idx| app.messages.get(idx));
 
+    let preview_max = ((f.area().width as usize) * 50 / 100).saturating_sub(10);
     let msg_preview = msg
         .map(|m| {
-            let preview = if m.body.len() > 50 {
-                format!("{}...", &m.body[..47])
+            let preview = if m.body.len() > preview_max && preview_max > 3 {
+                format!("{}...", &m.body[..preview_max.saturating_sub(3)])
             } else {
                 m.body.clone()
             };
@@ -1489,9 +1579,9 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
 
     if app.message_editing {
         // Edit mode: show text editor with wrapping
-        let edit_width: u16 = 60;
-        // Calculate how many lines the edit text wraps to
-        let text_inner_width = (edit_width as usize).saturating_sub(2 + 2); // borders + 2-char padding
+        // Use percentage-based width, compute inner width from actual area
+        let base_width = (f.area().width * 60 / 100).max(20).min(f.area().width);
+        let text_inner_width = (base_width as usize).saturating_sub(2 + 2); // borders + 2-char padding
         let text_lines = if text_inner_width == 0 {
             1
         } else {
@@ -1500,8 +1590,8 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         };
         let edit_area_lines = text_lines.clamp(1, 10) as u16;
         let err_lines: u16 = if app.message_edit_error.is_some() { 2 } else { 0 };
-        let height = 6 + edit_area_lines + err_lines; // padding+preview+padding+label+edit+padding+hint
-        let area = centered_rect(edit_width, height, f.area());
+        let height = (6 + edit_area_lines + err_lines).min(f.area().height);
+        let area = centered_rect(60, height, f.area());
         f.render_widget(Clear, area);
 
         let block = Block::default()
@@ -1527,7 +1617,8 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
 
         f.render_widget(
             Paragraph::new(format!("  {}", msg_preview))
-                .style(Style::default().fg(theme.text_dim)),
+                .style(Style::default().fg(theme.text_dim))
+                .wrap(Wrap { trim: false }),
             rows[1],
         );
 
@@ -1579,7 +1670,7 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
     } else {
         // Action menu: Edit / Delete
         let err_lines: u16 = if app.message_edit_error.is_some() { 1 } else { 0 };
-        let height = 9 + err_lines;
+        let height = (9 + err_lines).min(f.area().height);
         let area = centered_rect(50, height, f.area());
         f.render_widget(Clear, area);
 
@@ -1606,7 +1697,8 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
 
         f.render_widget(
             Paragraph::new(format!("  {}", msg_preview))
-                .style(Style::default().fg(theme.text_dim)),
+                .style(Style::default().fg(theme.text_dim))
+                .wrap(Wrap { trim: false }),
             rows[1],
         );
 
@@ -1633,13 +1725,15 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         if let Some(err) = &app.message_edit_error {
             f.render_widget(
                 Paragraph::new(format!("  {}", err))
-                    .style(Style::default().fg(theme.status_err)),
+                    .style(Style::default().fg(theme.status_err))
+                    .wrap(Wrap { trim: false }),
                 rows[6],
             );
         } else {
             f.render_widget(
-                Paragraph::new("  Enter: select   Esc: cancel")
-                    .style(Style::default().fg(theme.dimmed)),
+                Paragraph::new("  Enter: select  Esc: cancel")
+                    .style(Style::default().fg(theme.dimmed))
+                    .wrap(Wrap { trim: false }),
                 rows[6],
             );
         }
@@ -1699,7 +1793,8 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             );
             f.render_widget(
                 Paragraph::new("  Esc: cancel")
-                    .style(Style::default().fg(theme.dimmed)),
+                    .style(Style::default().fg(theme.dimmed))
+                    .wrap(Wrap { trim: false }),
                 rows[4],
             );
         }
@@ -1732,15 +1827,31 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
                 rows[1],
             );
             f.render_widget(
-                Paragraph::new("  Enter: accept   Esc: decline")
-                    .style(Style::default().fg(theme.dimmed)),
+                Paragraph::new("  Enter: accept  Esc: decline")
+                    .style(Style::default().fg(theme.dimmed))
+                    .wrap(Wrap { trim: false }),
                 rows[3],
             );
         }
 
         SasOverlayState::Emojis => {
+            let term = f.area();
+            let emoji_count = app.sas_emojis.len();
+            let emoji_field_width: usize = 6; // wider spacing between emojis
+
+            // Compute how many emojis fit per row based on available inner width
+            let base_width = (term.width * 70 / 100).max(20).min(term.width);
+            let inner_w = (base_width as usize).saturating_sub(4); // borders + padding
+            let emojis_per_row = (inner_w / emoji_field_width).max(1).min(emoji_count.max(1));
+            let emoji_rows = if emoji_count == 0 { 1 } else { (emoji_count + emojis_per_row - 1) / emojis_per_row };
+
             let err_lines: u16 = if app.sas_error.is_some() { 2 } else { 0 };
-            let area = centered_rect(65, 11 + err_lines, f.area());
+            // Each emoji row gets 3 lines: blank + emojis + blank (spacing)
+            let emoji_area = (emoji_rows as u16) * 3;
+            // Layout: 1 pad + 2 instruction + emoji_area + 1 pad + 1 hint + err
+            let height = (5 + emoji_area + err_lines).min(term.height);
+
+            let area = centered_rect(70, height, term);
             f.render_widget(Clear, area);
             let block = Block::default()
                 .title(" Verify Emojis ")
@@ -1752,14 +1863,12 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1), // padding
-                    Constraint::Length(2), // instruction (wrappable)
-                    Constraint::Length(1), // padding
-                    Constraint::Length(1), // emoji symbols
-                    Constraint::Length(1), // emoji descriptions
-                    Constraint::Length(1), // padding
-                    Constraint::Length(1), // hint
-                    Constraint::Min(1),   // error
+                    Constraint::Length(1),          // padding
+                    Constraint::Length(2),          // instruction
+                    Constraint::Length(emoji_area), // emoji rows with spacing
+                    Constraint::Length(1),          // padding
+                    Constraint::Length(1),          // hint
+                    Constraint::Min(0),            // error
                 ])
                 .split(inner);
 
@@ -1770,33 +1879,31 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
                 rows[1],
             );
 
-            // Build emoji line and description line
-            let emoji_line: String = app.sas_emojis.iter()
-                .map(|(symbol, _)| format!("{:^8}", symbol))
-                .collect::<Vec<_>>()
-                .join("");
-            let desc_line: String = app.sas_emojis.iter()
-                .map(|(_, desc)| format!("{:^8}", desc))
-                .collect::<Vec<_>>()
-                .join("");
+            // Build emoji lines with generous spacing — no description text
+            let mut emoji_lines: Vec<Line> = Vec::new();
+
+            for chunk in app.sas_emojis.chunks(emojis_per_row) {
+                emoji_lines.push(Line::from("")); // blank line above
+                let emoji_str: String = chunk.iter()
+                    .map(|(symbol, _)| format!(" {}  ", symbol))
+                    .collect::<Vec<_>>()
+                    .join("");
+                emoji_lines.push(Line::from(Span::styled(
+                    format!("    {}", emoji_str),
+                    Style::default().fg(theme.text),
+                )));
+                emoji_lines.push(Line::from("")); // blank line below
+            }
 
             f.render_widget(
-                Paragraph::new(format!("  {}", emoji_line))
-                    .style(Style::default().fg(theme.text))
-                    .wrap(Wrap { trim: false }),
-                rows[3],
+                Paragraph::new(emoji_lines),
+                rows[2],
             );
             f.render_widget(
-                Paragraph::new(format!("  {}", desc_line))
-                    .style(Style::default().fg(theme.text_dim))
-                    .wrap(Wrap { trim: false }),
-                rows[4],
-            );
-            f.render_widget(
-                Paragraph::new("  y/Enter: match   n: mismatch   Esc: cancel")
+                Paragraph::new("  y/Enter: match  n: mismatch  Esc: cancel")
                     .style(Style::default().fg(theme.dimmed))
                     .wrap(Wrap { trim: false }),
-                rows[6],
+                rows[4],
             );
 
             if let Some(err) = &app.sas_error {
@@ -1804,7 +1911,7 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
                     Paragraph::new(format!("  {}", err))
                         .style(Style::default().fg(theme.status_err))
                         .wrap(Wrap { trim: false }),
-                    rows[7],
+                    rows[5],
                 );
             }
         }
@@ -1863,7 +1970,8 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             );
             f.render_widget(
                 Paragraph::new("  Enter/Esc: close")
-                    .style(Style::default().fg(theme.dimmed)),
+                    .style(Style::default().fg(theme.dimmed))
+                    .wrap(Wrap { trim: false }),
                 rows[2],
             );
         }
@@ -1897,7 +2005,8 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             );
             f.render_widget(
                 Paragraph::new("  Enter/Esc: close")
-                    .style(Style::default().fg(theme.dimmed)),
+                    .style(Style::default().fg(theme.dimmed))
+                    .wrap(Wrap { trim: false }),
                 rows[3],
             );
         }

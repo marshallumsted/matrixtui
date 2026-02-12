@@ -140,7 +140,9 @@ pub struct App {
     pub settings_accounts_open: bool,
     pub settings_accounts_selected: usize, // 0=Add Account, 1..=N for accounts
     pub settings_account_action_open: bool,
-    pub settings_account_action_selected: usize, // 0=Reconnect, 1=Remove
+    pub settings_account_action_selected: usize, // 0=Reconnect, 1=Remove, 2=Edit Profile, 3=Verify Session
+    pub settings_verify_open: bool,
+    pub settings_verify_selected: usize, // 0=Recovery Key, 1=Another Device
     pub settings_theme_open: bool,
     pub settings_theme_selected: usize,
 
@@ -217,6 +219,9 @@ pub struct App {
     // Viewport size (messages that fit on screen), updated during draw
     pub chat_viewport_msgs: Cell<usize>,
 
+    // Help overlay scroll
+    pub help_scroll: usize,
+
     // Active theme
     pub theme: ui::Theme,
 
@@ -266,6 +271,8 @@ impl App {
             settings_accounts_selected: 0,
             settings_account_action_open: false,
             settings_account_action_selected: 0,
+            settings_verify_open: false,
+            settings_verify_selected: 0,
             settings_theme_open: false,
             settings_theme_selected: 0,
             room_sort,
@@ -319,6 +326,7 @@ impl App {
             sas_flow_id: None,
             sas_user_id: None,
             sas_handle: None,
+            help_scroll: 0,
             room_history_tokens: HashMap::new(),
             chat_viewport_msgs: Cell::new(10),
             theme,
@@ -388,6 +396,8 @@ impl App {
         self.settings_selected = 0;
         self.settings_accounts_open = false;
         self.settings_account_action_open = false;
+        self.settings_verify_open = false;
+        self.settings_verify_selected = 0;
         self.settings_theme_open = false;
         self.settings_sort_open = false;
     }
@@ -431,8 +441,18 @@ impl App {
         match self.overlay {
             Overlay::Login => self.handle_login_key(key).await,
             Overlay::Help => {
-                if key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
-                    self.overlay = Overlay::None;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('?') => {
+                        self.overlay = Overlay::None;
+                        self.help_scroll = 0;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.help_scroll += 1;
+                    }
+                    _ => {}
                 }
             }
             Overlay::RoomSwitcher => self.handle_switcher_key(key).await,
@@ -1644,7 +1664,9 @@ impl App {
     async fn handle_settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                if self.settings_account_action_open {
+                if self.settings_verify_open {
+                    self.settings_verify_open = false;
+                } else if self.settings_account_action_open {
                     self.settings_account_action_open = false;
                 } else if self.settings_accounts_open {
                     self.settings_accounts_open = false;
@@ -1657,7 +1679,10 @@ impl App {
                 }
             }
             KeyCode::Up => {
-                if self.settings_account_action_open {
+                if self.settings_verify_open {
+                    self.settings_verify_selected =
+                        self.settings_verify_selected.saturating_sub(1);
+                } else if self.settings_account_action_open {
                     self.settings_account_action_selected =
                         self.settings_account_action_selected.saturating_sub(1);
                 } else if self.settings_accounts_open {
@@ -1674,8 +1699,12 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.settings_account_action_open {
-                    if self.settings_account_action_selected < 4 {
+                if self.settings_verify_open {
+                    if self.settings_verify_selected < 1 {
+                        self.settings_verify_selected += 1;
+                    }
+                } else if self.settings_account_action_open {
+                    if self.settings_account_action_selected < 3 {
                         self.settings_account_action_selected += 1;
                     }
                 } else if self.settings_accounts_open {
@@ -1697,7 +1726,24 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if self.settings_account_action_open {
+                if self.settings_verify_open {
+                    let acct_idx = self.settings_accounts_selected - 1;
+                    match self.settings_verify_selected {
+                        0 => {
+                            // Recovery Key
+                            self.settings_verify_open = false;
+                            self.settings_account_action_open = false;
+                            self.open_recovery(acct_idx);
+                        }
+                        1 => {
+                            // Another Device (SAS)
+                            self.settings_verify_open = false;
+                            self.settings_account_action_open = false;
+                            self.open_sas_verify(acct_idx).await;
+                        }
+                        _ => {}
+                    }
+                } else if self.settings_account_action_open {
                     let acct_idx = self.settings_accounts_selected - 1;
                     match self.settings_account_action_selected {
                         0 => {
@@ -1721,14 +1767,9 @@ impl App {
                             self.open_profile_editor(acct_idx).await;
                         }
                         3 => {
-                            // Recovery Key
-                            self.settings_account_action_open = false;
-                            self.open_recovery(acct_idx);
-                        }
-                        4 => {
-                            // Verify from Device
-                            self.settings_account_action_open = false;
-                            self.open_sas_verify(acct_idx).await;
+                            // Verify Session — open sub-menu
+                            self.settings_verify_open = true;
+                            self.settings_verify_selected = 0;
                         }
                         _ => {}
                     }
@@ -2068,6 +2109,14 @@ impl App {
                         self.sas_handle = None;
                         self.overlay = Overlay::SasVerify;
                     }
+                }
+            }
+            MatrixEvent::SasStarted { flow_id, sas } => {
+                if self.sas_flow_id.as_deref() == Some(&flow_id)
+                    || self.overlay == Overlay::SasVerify
+                {
+                    self.sas_handle = Some(sas);
+                    self.sas_flow_id = Some(flow_id);
                 }
             }
             MatrixEvent::SasEmojis { flow_id, emojis } => {
