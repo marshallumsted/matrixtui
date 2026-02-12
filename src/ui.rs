@@ -382,8 +382,8 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(welcome, msg_area);
     } else {
         let msg_height = msg_area.height.saturating_sub(2) as usize;
-        // Each message takes ~3 lines (sender + body + blank)
-        let msgs_per_page = (msg_height / 3).max(1);
+        // Each message takes 2 lines (sender + body)
+        let msgs_per_page = (msg_height / 2).max(1);
         app.chat_viewport_msgs.set(msgs_per_page);
 
         let end = if app.messages.len() > app.scroll_offset {
@@ -416,11 +416,6 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default()
                 };
-                let blank_style = if is_selected {
-                    Style::default().bg(theme.highlight_bg)
-                } else {
-                    Style::default()
-                };
                 vec![
                     Line::from(Span::styled(
                         format!("  {}", msg.sender),
@@ -430,7 +425,6 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                         format!("  {}", msg.body),
                         body_style,
                     )),
-                    Line::styled("".to_string(), blank_style),
                 ]
             })
             .collect();
