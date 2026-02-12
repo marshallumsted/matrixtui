@@ -382,8 +382,8 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(welcome, msg_area);
     } else {
         let msg_height = msg_area.height.saturating_sub(2) as usize;
-        // Each message takes 2 lines (sender + body)
-        let msgs_per_page = (msg_height / 2).max(1);
+        // Each message takes 3 lines (sender + body + blank separator)
+        let msgs_per_page = (msg_height / 3).max(1);
         app.chat_viewport_msgs.set(msgs_per_page);
 
         let end = if app.messages.len() > app.scroll_offset {
@@ -393,7 +393,7 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         };
         let start = end.saturating_sub(msgs_per_page);
 
-        let visible: Vec<Line> = app.messages[start..end]
+        let mut visible: Vec<Line> = app.messages[start..end]
             .iter()
             .enumerate()
             .flat_map(|(i, msg)| {
@@ -425,9 +425,19 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                         format!("  {}", msg.body),
                         body_style,
                     )),
+                    Line::from(""),
                 ]
             })
             .collect();
+
+        // Bottom-align: pad top with empty lines so messages anchor to the bottom
+        let content_lines = visible.len();
+        if content_lines < msg_height {
+            let padding = msg_height - content_lines;
+            let mut padded = vec![Line::from(""); padding];
+            padded.append(&mut visible);
+            visible = padded;
+        }
 
         let messages = Paragraph::new(visible).block(msg_block).wrap(Wrap { trim: false });
         f.render_widget(messages, msg_area);
