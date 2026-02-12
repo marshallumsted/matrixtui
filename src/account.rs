@@ -3,12 +3,16 @@ use matrix_sdk::{
     Client, Room, SessionMeta, SessionTokens,
     authentication::matrix::MatrixSession,
     config::SyncSettings,
-    encryption::{BackupDownloadStrategy, EncryptionSettings},
+    encryption::{
+        BackupDownloadStrategy, EncryptionSettings,
+        verification::{SasVerification, VerificationRequest, VerificationRequestState},
+    },
     room::MessagesOptions,
     ruma::{
         OwnedRoomId, OwnedUserId, UInt, UserId,
         events::{
             AnySyncMessageLikeEvent, AnySyncTimelineEvent,
+            key::verification::VerificationMethod,
             room::message::{
                 MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
                 SyncRoomMessageEvent,
@@ -16,6 +20,7 @@ use matrix_sdk::{
         },
     },
 };
+use futures_util::StreamExt;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -46,6 +51,22 @@ pub enum MatrixEvent {
     KeysDownloaded {
         room_id: OwnedRoomId,
         account_id: String,
+    },
+    VerificationIncoming {
+        account_id: String,
+        user_id: String,
+        flow_id: String,
+    },
+    SasEmojis {
+        flow_id: String,
+        emojis: Vec<(String, String)>, // (symbol, description)
+    },
+    SasDone {
+        flow_id: String,
+    },
+    SasCancelled {
+        flow_id: String,
+        reason: String,
     },
 }
 
@@ -198,6 +219,23 @@ impl Account {
                             event_id: event.event_id.to_string(),
                         });
                         let _ = tx.send(MatrixEvent::RoomsUpdated { account_id: aid });
+                    }
+                },
+            );
+
+            // Register incoming verification request handler
+            let tx_verify = tx.clone();
+            let aid_verify = account_id.clone();
+            client.add_event_handler(
+                move |event: matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent| {
+                    let tx = tx_verify.clone();
+                    let aid = aid_verify.clone();
+                    async move {
+                        let _ = tx.send(MatrixEvent::VerificationIncoming {
+                            account_id: aid,
+                            user_id: event.sender.to_string(),
+                            flow_id: event.content.transaction_id.to_string(),
+                        });
                     }
                 },
             );
@@ -556,6 +594,160 @@ impl Account {
             .await
             .map(|s| s.is_complete())
             .unwrap_or(false)
+    }
+
+    /// Request self-verification (sends request to all other devices)
+    pub async fn request_self_verification(
+        &self,
+        tx: mpsc::UnboundedSender<MatrixEvent>,
+    ) -> Result<()> {
+        let user_id: &UserId = self.client.user_id()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let identity = self.client.encryption()
+            .get_user_identity(user_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Own identity not found"))?;
+
+        let methods = vec![VerificationMethod::SasV1];
+        let request = identity.request_verification_with_methods(methods).await?;
+        let flow_id = request.flow_id().to_string();
+        info!("Sent self-verification request, flow_id={}", flow_id);
+
+        // Spawn a task to watch the request state transitions
+        Self::spawn_verification_request_watcher(request, tx, flow_id);
+        Ok(())
+    }
+
+    /// Get a pending VerificationRequest by user_id and flow_id
+    pub async fn get_verification_request(
+        &self,
+        user_id_str: &str,
+        flow_id: &str,
+    ) -> Option<VerificationRequest> {
+        let user_id = OwnedUserId::try_from(user_id_str).ok()?;
+        self.client.encryption()
+            .get_verification_request(&user_id, flow_id).await
+    }
+
+    /// Accept an incoming verification request and start SAS
+    pub async fn accept_and_start_sas(
+        &self,
+        user_id_str: &str,
+        flow_id: &str,
+        tx: mpsc::UnboundedSender<MatrixEvent>,
+    ) -> Result<SasVerification> {
+        let request = self.get_verification_request(user_id_str, flow_id).await
+            .ok_or_else(|| anyhow::anyhow!("Verification request not found"))?;
+
+        request.accept().await?;
+
+        // Wait for the request to become ready, then start SAS
+        let mut changes = request.changes();
+        while let Some(state) = changes.next().await {
+            match state {
+                VerificationRequestState::Ready { .. } => break,
+                VerificationRequestState::Done
+                | VerificationRequestState::Cancelled(_) => {
+                    return Err(anyhow::anyhow!("Request cancelled before SAS could start"));
+                }
+                _ => {}
+            }
+        }
+
+        let sas = request.start_sas().await?
+            .ok_or_else(|| anyhow::anyhow!("Failed to start SAS verification"))?;
+
+        sas.accept().await?;
+        let flow_id = flow_id.to_string();
+
+        // Spawn SAS state watcher
+        Self::spawn_sas_watcher(sas.clone(), tx, flow_id);
+        Ok(sas)
+    }
+
+    /// Spawn a background task watching VerificationRequest state changes
+    fn spawn_verification_request_watcher(
+        request: VerificationRequest,
+        tx: mpsc::UnboundedSender<MatrixEvent>,
+        flow_id: String,
+    ) {
+        tokio::spawn(async move {
+            let mut changes = request.changes();
+            while let Some(state) = changes.next().await {
+                match state {
+                    VerificationRequestState::Transitioned { verification } => {
+                        if let Some(sas) = verification.sas() {
+                            sas.accept().await.ok();
+                            let fid = flow_id.clone();
+                            Self::spawn_sas_watcher(sas, tx.clone(), fid);
+                        }
+                        break;
+                    }
+                    VerificationRequestState::Done => break,
+                    VerificationRequestState::Cancelled(info) => {
+                        let _ = tx.send(MatrixEvent::SasCancelled {
+                            flow_id: flow_id.clone(),
+                            reason: info.reason().to_string(),
+                        });
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task watching SAS verification state changes
+    fn spawn_sas_watcher(
+        sas: SasVerification,
+        tx: mpsc::UnboundedSender<MatrixEvent>,
+        flow_id: String,
+    ) {
+        tokio::spawn(async move {
+            // Check if emojis are already available
+            if sas.can_be_presented() {
+                if let Some(emojis) = sas.emoji() {
+                    let emoji_pairs: Vec<(String, String)> = emojis.iter()
+                        .map(|e| (e.symbol.to_string(), e.description.to_string()))
+                        .collect();
+                    let _ = tx.send(MatrixEvent::SasEmojis {
+                        flow_id: flow_id.clone(),
+                        emojis: emoji_pairs,
+                    });
+                }
+            }
+
+            let mut changes = sas.changes();
+            while let Some(state) = changes.next().await {
+                use matrix_sdk::encryption::verification::SasState;
+                match state {
+                    SasState::KeysExchanged { emojis, .. } => {
+                        if let Some(emoji_sas) = emojis {
+                            let emoji_pairs: Vec<(String, String)> = emoji_sas.emojis.iter()
+                                .map(|e| (e.symbol.to_string(), e.description.to_string()))
+                                .collect();
+                            let _ = tx.send(MatrixEvent::SasEmojis {
+                                flow_id: flow_id.clone(),
+                                emojis: emoji_pairs,
+                            });
+                        }
+                    }
+                    SasState::Done { .. } => {
+                        let _ = tx.send(MatrixEvent::SasDone {
+                            flow_id: flow_id.clone(),
+                        });
+                        break;
+                    }
+                    SasState::Cancelled(info) => {
+                        let _ = tx.send(MatrixEvent::SasCancelled {
+                            flow_id: flow_id.clone(),
+                            reason: info.reason().to_string(),
+                        });
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 }
 

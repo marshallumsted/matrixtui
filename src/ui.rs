@@ -3,7 +3,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, Focus, Overlay, RoomSortMode};
+use crate::app::{App, Focus, Overlay, RoomSortMode, SasOverlayState};
 
 // --- Theme system ---
 
@@ -133,6 +133,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::RoomEditor => draw_editor_overlay(f, app),
         Overlay::Recovery => draw_recovery_overlay(f, app),
         Overlay::MessageAction => draw_message_action_overlay(f, app),
+        Overlay::SasVerify => draw_sas_verify_overlay(f, app),
         Overlay::None => {}
     }
 }
@@ -727,7 +728,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     if app.settings_accounts_open {
         content_lines += 1 + app.accounts.len() as u16; // Add Account + each account
         if app.settings_account_action_open {
-            content_lines += 4; // Reconnect + Remove + Edit Profile + Verify Session
+            content_lines += 5; // Reconnect + Remove + Edit Profile + Recovery Key + Verify from Device
         }
     }
     if app.settings_theme_open {
@@ -824,7 +825,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
 
             // Action menu for this account
             if is_action_target {
-                let actions = ["Reconnect", "Remove Account", "Edit Profile", "Verify Session"];
+                let actions = ["Reconnect", "Remove Account", "Edit Profile", "Recovery Key", "Verify from Device"];
                 for (j, action) in actions.iter().enumerate() {
                     let is_action_sel = app.settings_account_action_selected == j;
                     let action_prefix = if is_action_sel {
@@ -1650,6 +1651,256 @@ fn field_style(focused: bool, theme: &Theme) -> Style {
         Style::default().fg(theme.text).bg(theme.highlight_bg)
     } else {
         Style::default().fg(theme.text_dim)
+    }
+}
+
+fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+
+    let account_label = app
+        .accounts
+        .get(app.sas_account_idx)
+        .map(|a| a.user_id.as_str())
+        .unwrap_or("unknown");
+
+    match app.sas_state {
+        SasOverlayState::Waiting => {
+            let area = centered_rect(55, 8, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" Verify from Device ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            f.render_widget(
+                Paragraph::new(format!("  {}", account_label))
+                    .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                rows[1],
+            );
+            f.render_widget(
+                Paragraph::new("  Waiting for another device to accept...")
+                    .style(Style::default().fg(theme.text_dim)),
+                rows[3],
+            );
+            f.render_widget(
+                Paragraph::new("  Esc: cancel")
+                    .style(Style::default().fg(theme.dimmed)),
+                rows[5],
+            );
+        }
+
+        SasOverlayState::Incoming => {
+            let area = centered_rect(55, 8, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" Verification Request ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            let requester = app.sas_user_id.as_deref().unwrap_or("Another device");
+            f.render_widget(
+                Paragraph::new(format!("  {} wants to verify", requester))
+                    .style(Style::default().fg(theme.text)),
+                rows[1],
+            );
+            f.render_widget(
+                Paragraph::new("  this session.")
+                    .style(Style::default().fg(theme.text)),
+                rows[2],
+            );
+            f.render_widget(
+                Paragraph::new("  Enter: accept   Esc: decline")
+                    .style(Style::default().fg(theme.dimmed)),
+                rows[5],
+            );
+        }
+
+        SasOverlayState::Emojis => {
+            let err_lines: u16 = if app.sas_error.is_some() { 1 } else { 0 };
+            let area = centered_rect(65, 11 + err_lines, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" Verify Emojis ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // padding
+                    Constraint::Length(1), // instruction
+                    Constraint::Length(1), // padding
+                    Constraint::Length(1), // emoji symbols
+                    Constraint::Length(1), // emoji descriptions
+                    Constraint::Length(1), // padding
+                    Constraint::Length(1), // hint
+                    Constraint::Min(1),   // error
+                ])
+                .split(inner);
+
+            f.render_widget(
+                Paragraph::new("  Confirm these emojis match your other device:")
+                    .style(Style::default().fg(theme.text)),
+                rows[1],
+            );
+
+            // Build emoji line and description line
+            let emoji_line: String = app.sas_emojis.iter()
+                .map(|(symbol, _)| format!("{:^8}", symbol))
+                .collect::<Vec<_>>()
+                .join("");
+            let desc_line: String = app.sas_emojis.iter()
+                .map(|(_, desc)| format!("{:^8}", desc))
+                .collect::<Vec<_>>()
+                .join("");
+
+            f.render_widget(
+                Paragraph::new(format!("  {}", emoji_line))
+                    .style(Style::default().fg(theme.text)),
+                rows[3],
+            );
+            f.render_widget(
+                Paragraph::new(format!("  {}", desc_line))
+                    .style(Style::default().fg(theme.text_dim)),
+                rows[4],
+            );
+            f.render_widget(
+                Paragraph::new("  y/Enter: match   n: mismatch   Esc: cancel")
+                    .style(Style::default().fg(theme.dimmed)),
+                rows[6],
+            );
+
+            if let Some(err) = &app.sas_error {
+                f.render_widget(
+                    Paragraph::new(format!("  {}", err))
+                        .style(Style::default().fg(theme.status_err)),
+                    rows[7],
+                );
+            }
+        }
+
+        SasOverlayState::Confirming => {
+            let area = centered_rect(55, 6, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" Verifying... ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            f.render_widget(
+                Paragraph::new("  Waiting for other device to confirm...")
+                    .style(Style::default().fg(theme.status_warn)),
+                rows[1],
+            );
+        }
+
+        SasOverlayState::Done => {
+            let area = centered_rect(55, 6, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" Verified ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.status_ok));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            f.render_widget(
+                Paragraph::new("  Session verified successfully!")
+                    .style(Style::default().fg(theme.status_ok).add_modifier(Modifier::BOLD)),
+                rows[1],
+            );
+            f.render_widget(
+                Paragraph::new("  Enter/Esc: close")
+                    .style(Style::default().fg(theme.dimmed)),
+                rows[3],
+            );
+        }
+
+        SasOverlayState::Failed => {
+            let area = centered_rect(55, 8, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" Verification Failed ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.status_err));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            let reason = app.sas_error.as_deref().unwrap_or("Verification cancelled");
+            f.render_widget(
+                Paragraph::new(format!("  {}", reason))
+                    .style(Style::default().fg(theme.status_err))
+                    .wrap(Wrap { trim: false }),
+                rows[1],
+            );
+            f.render_widget(
+                Paragraph::new("  Enter/Esc: close")
+                    .style(Style::default().fg(theme.dimmed)),
+                rows[4],
+            );
+        }
     }
 }
 

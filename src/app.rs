@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use matrix_sdk::encryption::verification::SasVerification;
 use matrix_sdk::ruma::OwnedRoomId;
 use ratatui::prelude::*;
 use std::cell::Cell;
@@ -75,6 +76,18 @@ pub enum Overlay {
     RoomEditor,
     Recovery,
     MessageAction,
+    SasVerify,
+}
+
+/// State of the SAS verification overlay
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SasOverlayState {
+    Waiting,    // outgoing request sent, waiting for other device
+    Incoming,   // incoming request from another device
+    Emojis,     // showing emojis, user confirms or denies
+    Confirming, // user confirmed, waiting for other side
+    Done,       // verification complete
+    Failed,     // cancelled or error
 }
 
 /// A message stored for display
@@ -189,6 +202,15 @@ pub struct App {
     pub message_edit_error: Option<String>,
     pub message_edit_busy: bool,
 
+    // SAS verification overlay state
+    pub sas_state: SasOverlayState,
+    pub sas_emojis: Vec<(String, String)>,  // (symbol, description)
+    pub sas_error: Option<String>,
+    pub sas_account_idx: usize,
+    pub sas_flow_id: Option<String>,
+    pub sas_user_id: Option<String>,
+    pub sas_handle: Option<SasVerification>,
+
     // Pagination tokens for loading older messages
     pub room_history_tokens: HashMap<OwnedRoomId, Option<String>>,
 
@@ -290,6 +312,13 @@ impl App {
             message_edit_cursor: 0,
             message_edit_error: None,
             message_edit_busy: false,
+            sas_state: SasOverlayState::Waiting,
+            sas_emojis: Vec::new(),
+            sas_error: None,
+            sas_account_idx: 0,
+            sas_flow_id: None,
+            sas_user_id: None,
+            sas_handle: None,
             room_history_tokens: HashMap::new(),
             chat_viewport_msgs: Cell::new(10),
             theme,
@@ -413,6 +442,7 @@ impl App {
             Overlay::RoomEditor => self.handle_editor_key(key).await,
             Overlay::Recovery => self.handle_recovery_key(key).await,
             Overlay::MessageAction => self.handle_message_action_key(key).await,
+            Overlay::SasVerify => self.handle_sas_verify_key(key).await,
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
@@ -1060,6 +1090,119 @@ impl App {
         self.recovery_busy = false;
     }
 
+    // --- SAS Device Verification ---
+
+    async fn open_sas_verify(&mut self, account_idx: usize) {
+        if account_idx >= self.accounts.len() {
+            return;
+        }
+        self.sas_account_idx = account_idx;
+        self.sas_state = SasOverlayState::Waiting;
+        self.sas_emojis.clear();
+        self.sas_error = None;
+        self.sas_flow_id = None;
+        self.sas_user_id = None;
+        self.sas_handle = None;
+        self.overlay = Overlay::SasVerify;
+
+        // Send self-verification request
+        let tx = self.matrix_tx.clone();
+        match self.accounts[account_idx]
+            .request_self_verification(tx)
+            .await
+        {
+            Ok(()) => {
+                self.status_msg = "Verification request sent — check your other device".to_string();
+            }
+            Err(e) => {
+                self.sas_state = SasOverlayState::Failed;
+                self.sas_error = Some(e.to_string());
+            }
+        }
+    }
+
+    async fn handle_sas_verify_key(&mut self, key: KeyEvent) {
+        match self.sas_state {
+            SasOverlayState::Waiting => {
+                if key.code == KeyCode::Esc {
+                    self.overlay = Overlay::None;
+                }
+            }
+            SasOverlayState::Incoming => {
+                match key.code {
+                    KeyCode::Enter => {
+                        // Accept incoming request
+                        self.sas_state = SasOverlayState::Waiting;
+                        let idx = self.sas_account_idx;
+                        if idx < self.accounts.len() {
+                            let user_id = self.sas_user_id.clone().unwrap_or_default();
+                            let flow_id = self.sas_flow_id.clone().unwrap_or_default();
+                            let tx = self.matrix_tx.clone();
+                            match self.accounts[idx]
+                                .accept_and_start_sas(&user_id, &flow_id, tx)
+                                .await
+                            {
+                                Ok(sas) => {
+                                    self.sas_handle = Some(sas);
+                                }
+                                Err(e) => {
+                                    self.sas_state = SasOverlayState::Failed;
+                                    self.sas_error = Some(e.to_string());
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.overlay = Overlay::None;
+                    }
+                    _ => {}
+                }
+            }
+            SasOverlayState::Emojis => {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') => {
+                        // Confirm emojis match
+                        if let Some(sas) = &self.sas_handle {
+                            self.sas_state = SasOverlayState::Confirming;
+                            match sas.confirm().await {
+                                Ok(()) => {
+                                    // Wait for SasDone event from watcher
+                                }
+                                Err(e) => {
+                                    self.sas_state = SasOverlayState::Failed;
+                                    self.sas_error = Some(e.to_string());
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('n') => {
+                        // Mismatch
+                        if let Some(sas) = &self.sas_handle {
+                            let _ = sas.mismatch().await;
+                        }
+                        self.sas_state = SasOverlayState::Failed;
+                        self.sas_error = Some("Emojis did not match — verification cancelled".to_string());
+                    }
+                    KeyCode::Esc => {
+                        if let Some(sas) = &self.sas_handle {
+                            let _ = sas.cancel().await;
+                        }
+                        self.overlay = Overlay::None;
+                    }
+                    _ => {}
+                }
+            }
+            SasOverlayState::Confirming => {
+                // Busy, ignore input
+            }
+            SasOverlayState::Done | SasOverlayState::Failed => {
+                if key.code == KeyCode::Enter || key.code == KeyCode::Esc {
+                    self.overlay = Overlay::None;
+                }
+            }
+        }
+    }
+
     // --- Message Actions ---
 
     fn open_message_action(&mut self) {
@@ -1532,7 +1675,7 @@ impl App {
             }
             KeyCode::Down => {
                 if self.settings_account_action_open {
-                    if self.settings_account_action_selected < 3 {
+                    if self.settings_account_action_selected < 4 {
                         self.settings_account_action_selected += 1;
                     }
                 } else if self.settings_accounts_open {
@@ -1578,9 +1721,14 @@ impl App {
                             self.open_profile_editor(acct_idx).await;
                         }
                         3 => {
-                            // Verify Session
+                            // Recovery Key
                             self.settings_account_action_open = false;
                             self.open_recovery(acct_idx);
+                        }
+                        4 => {
+                            // Verify from Device
+                            self.settings_account_action_open = false;
+                            self.open_sas_verify(acct_idx).await;
                         }
                         _ => {}
                     }
@@ -1906,6 +2054,45 @@ impl App {
                     acct.sync_complete = false;
                 }
                 self.status_msg = format!("{}: sync error — {}", account_id, error);
+            }
+            MatrixEvent::VerificationIncoming { account_id, user_id, flow_id } => {
+                // Show incoming verification request if no overlay is open
+                if self.overlay == Overlay::None || self.overlay == Overlay::Settings {
+                    if let Some(idx) = self.accounts.iter().position(|a| a.user_id == account_id) {
+                        self.sas_account_idx = idx;
+                        self.sas_state = SasOverlayState::Incoming;
+                        self.sas_emojis.clear();
+                        self.sas_error = None;
+                        self.sas_flow_id = Some(flow_id);
+                        self.sas_user_id = Some(user_id);
+                        self.sas_handle = None;
+                        self.overlay = Overlay::SasVerify;
+                    }
+                }
+            }
+            MatrixEvent::SasEmojis { flow_id, emojis } => {
+                if self.sas_flow_id.as_deref() == Some(&flow_id)
+                    || self.overlay == Overlay::SasVerify
+                {
+                    self.sas_emojis = emojis;
+                    self.sas_state = SasOverlayState::Emojis;
+                }
+            }
+            MatrixEvent::SasDone { flow_id } => {
+                if self.sas_flow_id.as_deref() == Some(&flow_id)
+                    || self.overlay == Overlay::SasVerify
+                {
+                    self.sas_state = SasOverlayState::Done;
+                    self.status_msg = "Session verified!".to_string();
+                }
+            }
+            MatrixEvent::SasCancelled { flow_id, reason } => {
+                if self.sas_flow_id.as_deref() == Some(&flow_id)
+                    || self.overlay == Overlay::SasVerify
+                {
+                    self.sas_state = SasOverlayState::Failed;
+                    self.sas_error = Some(reason);
+                }
             }
         }
     }
