@@ -6,7 +6,7 @@ use matrix_sdk::{
     encryption::{BackupDownloadStrategy, EncryptionSettings},
     room::MessagesOptions,
     ruma::{
-        OwnedRoomId, OwnedUserId, UserId,
+        OwnedRoomId, OwnedUserId, UInt, UserId,
         events::{
             AnySyncMessageLikeEvent, AnySyncTimelineEvent,
             room::message::{
@@ -266,6 +266,7 @@ impl Account {
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
 
         let mut options = MessagesOptions::backward();
+        options.limit = UInt::from(limit);
         if let Some(token) = from {
             options = options.from(Some(token));
         } else {
