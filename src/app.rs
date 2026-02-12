@@ -2,6 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use matrix_sdk::ruma::OwnedRoomId;
 use ratatui::prelude::*;
+use std::cell::Cell;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -190,6 +191,9 @@ pub struct App {
     // Pagination tokens for loading older messages
     pub room_history_tokens: HashMap<OwnedRoomId, Option<String>>,
 
+    // Viewport size (messages that fit on screen), updated during draw
+    pub chat_viewport_msgs: Cell<usize>,
+
     // Active theme
     pub theme: ui::Theme,
 
@@ -285,6 +289,7 @@ impl App {
             message_edit_error: None,
             message_edit_busy: false,
             room_history_tokens: HashMap::new(),
+            chat_viewport_msgs: Cell::new(10),
             theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
@@ -1267,6 +1272,8 @@ impl App {
     }
 
     async fn handle_chat_key(&mut self, key: KeyEvent) {
+        let viewport = self.chat_viewport_msgs.get().max(1);
+
         match key.code {
             KeyCode::Up => {
                 if self.messages.is_empty() {
@@ -1283,16 +1290,27 @@ impl App {
                         self.fetch_older_messages().await;
                     }
                     Some(idx) => {
-                        self.selected_message = Some(idx - 1);
-                        self.scroll_offset = self.scroll_offset.saturating_add(1);
+                        let new_idx = idx - 1;
+                        self.selected_message = Some(new_idx);
+                        // Only scroll if selection would go above the visible area
+                        let end = self.messages.len().saturating_sub(self.scroll_offset);
+                        let start = end.saturating_sub(viewport);
+                        if new_idx < start {
+                            self.scroll_offset = self.scroll_offset.saturating_add(1);
+                        }
                     }
                 }
             }
             KeyCode::Down => {
                 match self.selected_message {
                     Some(idx) if idx + 1 < self.messages.len() => {
-                        self.selected_message = Some(idx + 1);
-                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                        let new_idx = idx + 1;
+                        self.selected_message = Some(new_idx);
+                        // Only scroll if selection would go below the visible area
+                        let end = self.messages.len().saturating_sub(self.scroll_offset);
+                        if new_idx >= end {
+                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                        }
                     }
                     Some(_) => {
                         // At bottom — deselect, return to live view
@@ -1310,7 +1328,7 @@ impl App {
             KeyCode::Home => {
                 if !self.messages.is_empty() {
                     self.selected_message = Some(0);
-                    self.scroll_offset = self.messages.len().saturating_sub(1);
+                    self.scroll_offset = self.messages.len().saturating_sub(viewport);
                 }
             }
             KeyCode::End => {

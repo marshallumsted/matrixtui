@@ -382,16 +382,16 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(welcome, msg_area);
     } else {
         let msg_height = msg_area.height.saturating_sub(2) as usize;
-        let start = if app.messages.len() > msg_height + app.scroll_offset {
-            app.messages.len() - msg_height - app.scroll_offset
-        } else {
-            0
-        };
+        // Each message takes ~3 lines (sender + body + blank)
+        let msgs_per_page = (msg_height / 3).max(1);
+        app.chat_viewport_msgs.set(msgs_per_page);
+
         let end = if app.messages.len() > app.scroll_offset {
             app.messages.len() - app.scroll_offset
         } else {
             app.messages.len()
         };
+        let start = end.saturating_sub(msgs_per_page);
 
         let visible: Vec<Line> = app.messages[start..end]
             .iter()
