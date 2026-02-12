@@ -1677,29 +1677,30 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Min(1),
+                    Constraint::Length(1), // padding
+                    Constraint::Length(1), // account
+                    Constraint::Length(1), // padding
+                    Constraint::Min(2),   // message
+                    Constraint::Length(1), // hint
                 ])
                 .split(inner);
 
             f.render_widget(
                 Paragraph::new(format!("  {}", account_label))
-                    .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                    .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+                    .wrap(Wrap { trim: false }),
                 rows[1],
             );
             f.render_widget(
                 Paragraph::new("  Waiting for another device to accept...")
-                    .style(Style::default().fg(theme.text_dim)),
+                    .style(Style::default().fg(theme.text_dim))
+                    .wrap(Wrap { trim: false }),
                 rows[3],
             );
             f.render_widget(
                 Paragraph::new("  Esc: cancel")
                     .style(Style::default().fg(theme.dimmed)),
-                rows[5],
+                rows[4],
             );
         }
 
@@ -1716,35 +1717,29 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Min(1),
+                    Constraint::Length(1), // padding
+                    Constraint::Min(2),   // message
+                    Constraint::Length(1), // padding
+                    Constraint::Length(1), // hint
                 ])
                 .split(inner);
 
             let requester = app.sas_user_id.as_deref().unwrap_or("Another device");
             f.render_widget(
-                Paragraph::new(format!("  {} wants to verify", requester))
-                    .style(Style::default().fg(theme.text)),
+                Paragraph::new(format!("  {} wants to verify this session.", requester))
+                    .style(Style::default().fg(theme.text))
+                    .wrap(Wrap { trim: false }),
                 rows[1],
-            );
-            f.render_widget(
-                Paragraph::new("  this session.")
-                    .style(Style::default().fg(theme.text)),
-                rows[2],
             );
             f.render_widget(
                 Paragraph::new("  Enter: accept   Esc: decline")
                     .style(Style::default().fg(theme.dimmed)),
-                rows[5],
+                rows[3],
             );
         }
 
         SasOverlayState::Emojis => {
-            let err_lines: u16 = if app.sas_error.is_some() { 1 } else { 0 };
+            let err_lines: u16 = if app.sas_error.is_some() { 2 } else { 0 };
             let area = centered_rect(65, 11 + err_lines, f.area());
             f.render_widget(Clear, area);
             let block = Block::default()
@@ -1758,7 +1753,7 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // padding
-                    Constraint::Length(1), // instruction
+                    Constraint::Length(2), // instruction (wrappable)
                     Constraint::Length(1), // padding
                     Constraint::Length(1), // emoji symbols
                     Constraint::Length(1), // emoji descriptions
@@ -1770,7 +1765,8 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
 
             f.render_widget(
                 Paragraph::new("  Confirm these emojis match your other device:")
-                    .style(Style::default().fg(theme.text)),
+                    .style(Style::default().fg(theme.text))
+                    .wrap(Wrap { trim: false }),
                 rows[1],
             );
 
@@ -1786,24 +1782,28 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
 
             f.render_widget(
                 Paragraph::new(format!("  {}", emoji_line))
-                    .style(Style::default().fg(theme.text)),
+                    .style(Style::default().fg(theme.text))
+                    .wrap(Wrap { trim: false }),
                 rows[3],
             );
             f.render_widget(
                 Paragraph::new(format!("  {}", desc_line))
-                    .style(Style::default().fg(theme.text_dim)),
+                    .style(Style::default().fg(theme.text_dim))
+                    .wrap(Wrap { trim: false }),
                 rows[4],
             );
             f.render_widget(
                 Paragraph::new("  y/Enter: match   n: mismatch   Esc: cancel")
-                    .style(Style::default().fg(theme.dimmed)),
+                    .style(Style::default().fg(theme.dimmed))
+                    .wrap(Wrap { trim: false }),
                 rows[6],
             );
 
             if let Some(err) = &app.sas_error {
                 f.render_widget(
                     Paragraph::new(format!("  {}", err))
-                        .style(Style::default().fg(theme.status_err)),
+                        .style(Style::default().fg(theme.status_err))
+                        .wrap(Wrap { trim: false }),
                     rows[7],
                 );
             }
@@ -1823,14 +1823,15 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
-                    Constraint::Length(1),
                     Constraint::Min(1),
+                    Constraint::Length(1),
                 ])
                 .split(inner);
 
             f.render_widget(
                 Paragraph::new("  Waiting for other device to confirm...")
-                    .style(Style::default().fg(theme.status_warn)),
+                    .style(Style::default().fg(theme.status_warn))
+                    .wrap(Wrap { trim: false }),
                 rows[1],
             );
         }
@@ -1849,21 +1850,21 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
                     Constraint::Min(1),
+                    Constraint::Length(1),
                 ])
                 .split(inner);
 
             f.render_widget(
                 Paragraph::new("  Session verified successfully!")
-                    .style(Style::default().fg(theme.status_ok).add_modifier(Modifier::BOLD)),
+                    .style(Style::default().fg(theme.status_ok).add_modifier(Modifier::BOLD))
+                    .wrap(Wrap { trim: false }),
                 rows[1],
             );
             f.render_widget(
                 Paragraph::new("  Enter/Esc: close")
                     .style(Style::default().fg(theme.dimmed)),
-                rows[3],
+                rows[2],
             );
         }
 
@@ -1881,10 +1882,9 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
+                    Constraint::Min(2),
                     Constraint::Length(1),
                     Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Min(1),
                 ])
                 .split(inner);
 
@@ -1898,7 +1898,7 @@ fn draw_sas_verify_overlay(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new("  Enter/Esc: close")
                     .style(Style::default().fg(theme.dimmed)),
-                rows[4],
+                rows[3],
             );
         }
     }

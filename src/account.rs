@@ -674,7 +674,34 @@ impl Account {
             let mut changes = request.changes();
             while let Some(state) = changes.next().await {
                 match state {
+                    VerificationRequestState::Ready { .. } => {
+                        // Other device accepted — start the SAS flow
+                        info!("Verification request ready, starting SAS");
+                        match request.start_sas().await {
+                            Ok(Some(sas)) => {
+                                sas.accept().await.ok();
+                                let fid = flow_id.clone();
+                                Self::spawn_sas_watcher(sas, tx.clone(), fid);
+                                break;
+                            }
+                            Ok(None) => {
+                                let _ = tx.send(MatrixEvent::SasCancelled {
+                                    flow_id: flow_id.clone(),
+                                    reason: "Failed to start SAS".to_string(),
+                                });
+                                break;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(MatrixEvent::SasCancelled {
+                                    flow_id: flow_id.clone(),
+                                    reason: e.to_string(),
+                                });
+                                break;
+                            }
+                        }
+                    }
                     VerificationRequestState::Transitioned { verification } => {
+                        // Other side started SAS directly
                         if let Some(sas) = verification.sas() {
                             sas.accept().await.ok();
                             let fid = flow_id.clone();
