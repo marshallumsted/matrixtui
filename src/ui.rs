@@ -132,6 +132,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::RoomCreator => draw_creator_overlay(f, app),
         Overlay::RoomEditor => draw_editor_overlay(f, app),
         Overlay::Recovery => draw_recovery_overlay(f, app),
+        Overlay::MessageAction => draw_message_action_overlay(f, app),
         Overlay::None => {}
     }
 }
@@ -394,16 +395,42 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
 
         let visible: Vec<Line> = app.messages[start..end]
             .iter()
-            .flat_map(|msg| {
+            .enumerate()
+            .flat_map(|(i, msg)| {
+                let msg_idx = start + i;
+                let is_selected = app.selected_message == Some(msg_idx);
+                let sender_style = if is_selected {
+                    Style::default()
+                        .fg(theme.accent)
+                        .bg(theme.highlight_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                };
+                let body_style = if is_selected {
+                    Style::default()
+                        .fg(theme.text)
+                        .bg(theme.highlight_bg)
+                } else {
+                    Style::default()
+                };
+                let blank_style = if is_selected {
+                    Style::default().bg(theme.highlight_bg)
+                } else {
+                    Style::default()
+                };
                 vec![
                     Line::from(Span::styled(
                         format!("  {}", msg.sender),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
+                        sender_style,
                     )),
-                    Line::from(Span::raw(format!("  {}", msg.body))),
-                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!("  {}", msg.body),
+                        body_style,
+                    )),
+                    Line::styled("".to_string(), blank_style),
                 ]
             })
             .collect();
@@ -573,7 +600,7 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         "    Tab/Shift+Tab    Cycle panels",
         "    Arrow keys       Navigate within panel",
         "    Enter            Select room / send message",
-        "    Esc              Back",
+        "    Esc              Back / deselect",
         "",
         "  Global:",
         "    Ctrl+K           Quick room switcher",
@@ -589,8 +616,11 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         "    Shift+Up/Down    Reorder favorites",
         "",
         "  Chat:",
-        "    Enter            Start typing",
-        "    Up/Down          Scroll messages",
+        "    Up/Down          Select / scroll messages",
+        "    Enter            Message actions (edit/delete)",
+        "    Tab              Focus input box",
+        "    Esc              Deselect / back to rooms",
+        "    Home/End         Jump to oldest / newest",
     ];
 
     let text: Vec<Line> = help_text.iter().map(|&s| Line::from(s)).collect();
@@ -1408,6 +1438,162 @@ fn draw_recovery_overlay(f: &mut Frame, app: &App) {
             .style(Style::default().fg(theme.dimmed)),
         rows[7],
     );
+}
+
+fn draw_message_action_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+
+    let msg = app
+        .selected_message
+        .and_then(|idx| app.messages.get(idx));
+
+    let msg_preview = msg
+        .map(|m| {
+            let preview = if m.body.len() > 50 {
+                format!("{}...", &m.body[..47])
+            } else {
+                m.body.clone()
+            };
+            format!("{}: {}", m.sender, preview)
+        })
+        .unwrap_or_default();
+
+    if app.message_editing {
+        // Edit mode: show text editor
+        let err_lines: u16 = if app.message_edit_error.is_some() { 2 } else { 0 };
+        let height = 10 + err_lines;
+        let area = centered_rect(60, height, f.area());
+        f.render_widget(Clear, area);
+
+        let block = Block::default()
+            .title(" Edit Message ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.accent));
+
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // padding
+                Constraint::Length(1), // original preview
+                Constraint::Length(1), // padding
+                Constraint::Length(1), // label
+                Constraint::Length(1), // input field
+                Constraint::Length(1), // padding
+                Constraint::Min(1),   // error or hint
+            ])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(format!("  {}", msg_preview))
+                .style(Style::default().fg(theme.text_dim)),
+            rows[1],
+        );
+
+        f.render_widget(
+            Paragraph::new("  New text:").style(Style::default().fg(theme.text_dim)),
+            rows[3],
+        );
+
+        f.render_widget(
+            Paragraph::new(format!("  {}", app.message_edit_text))
+                .style(field_style(true, theme)),
+            rows[4],
+        );
+
+        // Cursor
+        let cursor_x = inner.x + 2 + app.message_edit_text.len() as u16;
+        f.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), rows[4].y));
+
+        if app.message_edit_busy {
+            f.render_widget(
+                Paragraph::new("  Saving...").style(Style::default().fg(theme.status_warn)),
+                rows[6],
+            );
+        } else if let Some(err) = &app.message_edit_error {
+            f.render_widget(
+                Paragraph::new(format!("  {}", err))
+                    .wrap(Wrap { trim: false })
+                    .style(Style::default().fg(theme.status_err)),
+                rows[6],
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new("  Enter: save   Esc: back")
+                    .style(Style::default().fg(theme.dimmed)),
+                rows[6],
+            );
+        }
+    } else {
+        // Action menu: Edit / Delete
+        let err_lines: u16 = if app.message_edit_error.is_some() { 1 } else { 0 };
+        let height = 9 + err_lines;
+        let area = centered_rect(50, height, f.area());
+        f.render_widget(Clear, area);
+
+        let block = Block::default()
+            .title(" Message Actions ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.accent));
+
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // padding
+                Constraint::Length(1), // message preview
+                Constraint::Length(1), // padding
+                Constraint::Length(1), // Edit option
+                Constraint::Length(1), // Delete option
+                Constraint::Length(1), // padding
+                Constraint::Min(1),   // error or hint
+            ])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(format!("  {}", msg_preview))
+                .style(Style::default().fg(theme.text_dim)),
+            rows[1],
+        );
+
+        let actions = ["Edit Message", "Delete Message"];
+        for (i, action) in actions.iter().enumerate() {
+            let is_sel = app.message_action_selected == i;
+            let prefix = if is_sel { "  > " } else { "    " };
+            let style = if is_sel {
+                let fg = if i == 1 { theme.status_err } else { theme.text };
+                Style::default()
+                    .fg(fg)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                let fg = if i == 1 { theme.status_err } else { theme.text_dim };
+                Style::default().fg(fg)
+            };
+            f.render_widget(
+                Paragraph::new(format!("{}{}", prefix, action)).style(style),
+                rows[3 + i],
+            );
+        }
+
+        if let Some(err) = &app.message_edit_error {
+            f.render_widget(
+                Paragraph::new(format!("  {}", err))
+                    .style(Style::default().fg(theme.status_err)),
+                rows[6],
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new("  Enter: select   Esc: cancel")
+                    .style(Style::default().fg(theme.dimmed)),
+                rows[6],
+            );
+        }
+    }
 }
 
 fn field_style(focused: bool, theme: &Theme) -> Style {

@@ -73,11 +73,13 @@ pub enum Overlay {
     RoomCreator,
     RoomEditor,
     Recovery,
+    MessageAction,
 }
 
 /// A message stored for display
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
+    pub event_id: Option<String>,
     pub sender: String,
     pub body: String,
     pub timestamp: u64,
@@ -175,6 +177,19 @@ pub struct App {
     pub recovery_busy: bool,
     pub recovery_account_idx: usize,
 
+    // Message selection state
+    pub selected_message: Option<usize>,
+
+    // Message action overlay state
+    pub message_action_selected: usize, // 0=Edit, 1=Delete
+    pub message_editing: bool,
+    pub message_edit_text: String,
+    pub message_edit_error: Option<String>,
+    pub message_edit_busy: bool,
+
+    // Pagination tokens for loading older messages
+    pub room_history_tokens: HashMap<OwnedRoomId, Option<String>>,
+
     // Active theme
     pub theme: ui::Theme,
 
@@ -263,6 +278,13 @@ impl App {
             recovery_error: None,
             recovery_busy: false,
             recovery_account_idx: 0,
+            selected_message: None,
+            message_action_selected: 0,
+            message_editing: false,
+            message_edit_text: String::new(),
+            message_edit_error: None,
+            message_edit_busy: false,
+            room_history_tokens: HashMap::new(),
             theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
@@ -383,10 +405,11 @@ impl App {
             Overlay::RoomCreator => self.handle_creator_key(key).await,
             Overlay::RoomEditor => self.handle_editor_key(key).await,
             Overlay::Recovery => self.handle_recovery_key(key).await,
+            Overlay::MessageAction => self.handle_message_action_key(key).await,
             Overlay::None => match self.focus {
                 Focus::Accounts => self.handle_accounts_key(key),
                 Focus::Rooms => self.handle_rooms_key(key).await,
-                Focus::Chat => self.handle_chat_key(key),
+                Focus::Chat => self.handle_chat_key(key).await,
                 Focus::Input => self.handle_input_key(key).await,
                 Focus::LoginOverlay => {}
             },
@@ -1030,21 +1053,281 @@ impl App {
         self.recovery_busy = false;
     }
 
-    fn handle_chat_key(&mut self, key: KeyEvent) {
+    // --- Message Actions ---
+
+    fn open_message_action(&mut self) {
+        if let Some(idx) = self.selected_message {
+            if idx < self.messages.len() {
+                self.message_action_selected = 0;
+                self.message_editing = false;
+                self.message_edit_text = self.messages[idx].body.clone();
+                self.message_edit_error = None;
+                self.message_edit_busy = false;
+                self.overlay = Overlay::MessageAction;
+            }
+        }
+    }
+
+    async fn handle_message_action_key(&mut self, key: KeyEvent) {
+        if self.message_edit_busy {
+            return;
+        }
+
+        if self.message_editing {
+            // In edit text mode
+            match key.code {
+                KeyCode::Enter => {
+                    self.do_edit_message().await;
+                }
+                KeyCode::Esc => {
+                    self.message_editing = false;
+                    self.message_edit_error = None;
+                }
+                KeyCode::Char(c) => {
+                    self.message_edit_text.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.message_edit_text.pop();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Up => {
-                self.scroll_offset = self.scroll_offset.saturating_add(1);
+                self.message_action_selected = self.message_action_selected.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                if self.message_action_selected < 1 {
+                    self.message_action_selected += 1;
+                }
             }
             KeyCode::Enter => {
-                self.focus = Focus::Input;
+                match self.message_action_selected {
+                    0 => {
+                        // Edit — open text editor
+                        if let Some(idx) = self.selected_message {
+                            if let Some(msg) = self.messages.get(idx) {
+                                if msg.event_id.is_none() {
+                                    self.message_edit_error =
+                                        Some("Cannot edit: no event ID".to_string());
+                                    return;
+                                }
+                                self.message_editing = true;
+                                self.message_edit_error = None;
+                            }
+                        }
+                    }
+                    1 => {
+                        // Delete
+                        self.do_delete_message().await;
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+            }
+            _ => {}
+        }
+    }
+
+    async fn do_edit_message(&mut self) {
+        let msg_idx = match self.selected_message {
+            Some(idx) => idx,
+            None => return,
+        };
+        let msg = match self.messages.get(msg_idx) {
+            Some(m) => m.clone(),
+            None => return,
+        };
+        let event_id = match &msg.event_id {
+            Some(id) => id.clone(),
+            None => {
+                self.message_edit_error = Some("Cannot edit: no event ID".to_string());
+                return;
+            }
+        };
+        let (room_id, account_id) = match (&self.active_room, &self.active_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+
+        self.message_edit_busy = true;
+        self.message_edit_error = None;
+
+        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match account
+                .edit_message(&room_id, &event_id, &self.message_edit_text)
+                .await
+            {
+                Ok(()) => {
+                    // Update local message
+                    if let Some(m) = self.messages.get_mut(msg_idx) {
+                        m.body = self.message_edit_text.clone();
+                    }
+                    self.overlay = Overlay::None;
+                    self.status_msg = "Message edited".to_string();
+                }
+                Err(e) => {
+                    self.message_edit_error = Some(e.to_string());
+                }
+            }
+        }
+        self.message_edit_busy = false;
+    }
+
+    async fn do_delete_message(&mut self) {
+        let msg_idx = match self.selected_message {
+            Some(idx) => idx,
+            None => return,
+        };
+        let msg = match self.messages.get(msg_idx) {
+            Some(m) => m.clone(),
+            None => return,
+        };
+        let event_id = match &msg.event_id {
+            Some(id) => id.clone(),
+            None => {
+                self.message_edit_error = Some("Cannot delete: no event ID".to_string());
+                return;
+            }
+        };
+        let (room_id, account_id) = match (&self.active_room, &self.active_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+
+        self.message_edit_busy = true;
+        self.message_edit_error = None;
+
+        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match account.redact_message(&room_id, &event_id).await {
+                Ok(()) => {
+                    self.messages.remove(msg_idx);
+                    // Adjust selected_message
+                    if self.messages.is_empty() {
+                        self.selected_message = None;
+                    } else if msg_idx >= self.messages.len() {
+                        self.selected_message = Some(self.messages.len() - 1);
+                    }
+                    self.overlay = Overlay::None;
+                    self.status_msg = "Message deleted".to_string();
+                }
+                Err(e) => {
+                    self.message_edit_error = Some(e.to_string());
+                }
+            }
+        }
+        self.message_edit_busy = false;
+    }
+
+    async fn fetch_older_messages(&mut self) {
+        let (room_id, account_id) = match (&self.active_room, &self.active_account_id) {
+            (Some(r), Some(a)) => (r.clone(), a.clone()),
+            _ => return,
+        };
+        let token = match self.room_history_tokens.get(&room_id) {
+            Some(Some(t)) => t.clone(),
+            _ => return, // no more history or no token stored
+        };
+
+        self.status_msg = "Loading older messages...".to_string();
+
+        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+            match account
+                .fetch_history_paged(&room_id, Some(&token), 50)
+                .await
+            {
+                Ok((mut older_msgs, next_token)) => {
+                    if older_msgs.is_empty() {
+                        self.room_history_tokens.insert(room_id, None);
+                        self.status_msg = "No more messages".to_string();
+                        return;
+                    }
+                    let count = older_msgs.len();
+                    // Prepend older messages
+                    older_msgs.append(&mut self.messages);
+                    self.messages = older_msgs;
+                    // Adjust selected_message and scroll_offset for the prepended messages
+                    if let Some(sel) = self.selected_message {
+                        self.selected_message = Some(sel + count);
+                    }
+                    self.scroll_offset += count;
+                    // Store next token for further pagination
+                    self.room_history_tokens.insert(room_id, next_token);
+                    self.status_msg = format!("Loaded {} older messages", count);
+                }
+                Err(e) => {
+                    self.status_msg = format!("Failed to load history: {}", e);
+                }
+            }
+        }
+    }
+
+    async fn handle_chat_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => {
+                if self.messages.is_empty() {
+                    return;
+                }
+                match self.selected_message {
+                    None => {
+                        // Start selecting from the bottom
+                        self.selected_message = Some(self.messages.len() - 1);
+                        self.scroll_offset = 0;
+                    }
+                    Some(0) => {
+                        // At top — try to load older messages
+                        self.fetch_older_messages().await;
+                    }
+                    Some(idx) => {
+                        self.selected_message = Some(idx - 1);
+                        self.scroll_offset = self.scroll_offset.saturating_add(1);
+                    }
+                }
+            }
+            KeyCode::Down => {
+                match self.selected_message {
+                    Some(idx) if idx + 1 < self.messages.len() => {
+                        self.selected_message = Some(idx + 1);
+                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                    }
+                    Some(_) => {
+                        // At bottom — deselect, return to live view
+                        self.selected_message = None;
+                        self.scroll_offset = 0;
+                    }
+                    None => {}
+                }
+            }
+            KeyCode::Enter => {
+                if self.selected_message.is_some() {
+                    self.open_message_action();
+                }
+            }
+            KeyCode::Home => {
+                if !self.messages.is_empty() {
+                    self.selected_message = Some(0);
+                    self.scroll_offset = self.messages.len().saturating_sub(1);
+                }
+            }
+            KeyCode::End => {
+                self.selected_message = None;
+                self.scroll_offset = 0;
             }
             KeyCode::Tab => self.focus = Focus::Input,
             KeyCode::BackTab => self.focus = Focus::Rooms,
             KeyCode::Left => self.focus = Focus::Rooms,
-            KeyCode::Esc => self.focus = Focus::Rooms,
+            KeyCode::Esc => {
+                if self.selected_message.is_some() {
+                    self.selected_message = None;
+                    self.scroll_offset = 0;
+                } else {
+                    self.focus = Focus::Rooms;
+                }
+            }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             _ => {}
         }
@@ -1456,6 +1739,7 @@ impl App {
                 Ok(_) => {
                     // Local echo — show our own message immediately
                     let msg = DisplayMessage {
+                        event_id: None, // filled in when sync returns the event
                         sender: account.user_id.clone(),
                         body: body.to_string(),
                         timestamp: std::time::SystemTime::now()
@@ -1485,6 +1769,7 @@ impl App {
                 sender,
                 body,
                 timestamp,
+                event_id,
             } => {
                 // Skip if this is our own message echoed back from sync
                 if let Some(pos) = self.pending_echoes.iter().position(|b| *b == body) {
@@ -1496,6 +1781,7 @@ impl App {
                 }
 
                 let msg = DisplayMessage {
+                    event_id: Some(event_id),
                     sender: sender.to_string(),
                     body,
                     timestamp,
@@ -1670,6 +1956,7 @@ impl App {
             self.active_account_id = Some(account_id.clone());
             self.messages.clear();
             self.scroll_offset = 0;
+            self.selected_message = None;
             self.focus = Focus::Chat;
 
             let account_synced = self
@@ -1685,11 +1972,12 @@ impl App {
                 self.status_msg = format!("Loading {}...", room_name);
             }
 
-            // Try fetch_history first
+            // Try fetch_history first (with pagination token)
             if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
-                match account.fetch_history(&room_id, 50).await {
-                    Ok(msgs) if !msgs.is_empty() => {
+                match account.fetch_history_paged(&room_id, None, 50).await {
+                    Ok((msgs, end_token)) if !msgs.is_empty() => {
                         let count = msgs.len();
+                        self.room_history_tokens.insert(room_id.clone(), end_token);
                         let has_encrypted = msgs.iter().any(|m| m.body.contains("[encrypted message"));
                         self.messages = msgs;
                         if has_encrypted {
@@ -1717,7 +2005,7 @@ impl App {
                             );
                         }
                     }
-                    Ok(_) => {
+                    Ok((_, _)) => {
                         // fetch_history returned empty — fall back to cached messages from sync
                         if let Some(cached) = self.room_messages.get(&room_id) {
                             let count = cached.len();

@@ -31,6 +31,7 @@ pub enum MatrixEvent {
         sender: OwnedUserId,
         body: String,
         timestamp: u64,
+        event_id: String,
     },
     RoomsUpdated {
         account_id: String,
@@ -188,12 +189,13 @@ impl Account {
                         };
                         let _ = tx.send(MatrixEvent::Message {
                             room_id: room.room_id().to_owned(),
-                            sender: event.sender,
+                            sender: event.sender.clone(),
                             body,
                             timestamp: event
                                 .origin_server_ts
                                 .as_secs()
                                 .into(),
+                            event_id: event.event_id.to_string(),
                         });
                         let _ = tx.send(MatrixEvent::RoomsUpdated { account_id: aid });
                     }
@@ -251,27 +253,31 @@ impl Account {
         result
     }
 
-    /// Fetch recent message history for a room
-    pub async fn fetch_history(
+    /// Fetch message history with pagination support
+    pub async fn fetch_history_paged(
         &self,
         room_id: &OwnedRoomId,
+        from: Option<&str>,
         limit: u32,
-    ) -> Result<Vec<crate::app::DisplayMessage>> {
+    ) -> Result<(Vec<crate::app::DisplayMessage>, Option<String>)> {
         let room = self
             .client
             .get_room(room_id)
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
 
-        let prev_batch = room.last_prev_batch();
-        info!(
-            "fetch_history for {} — prev_batch: {:?}",
-            room_id,
-            prev_batch.as_deref().unwrap_or("None")
-        );
-
         let mut options = MessagesOptions::backward();
-        if prev_batch.is_some() {
-            options = options.from(prev_batch.as_deref());
+        if let Some(token) = from {
+            options = options.from(Some(token));
+        } else {
+            let prev_batch = room.last_prev_batch();
+            info!(
+                "fetch_history for {} — prev_batch: {:?}",
+                room_id,
+                prev_batch.as_deref().unwrap_or("None")
+            );
+            if prev_batch.is_some() {
+                options = options.from(prev_batch.as_deref());
+            }
         }
 
         let response = room.messages(options).await?;
@@ -301,6 +307,7 @@ impl Account {
                         sender: original.sender.to_string(),
                         body,
                         timestamp: original.origin_server_ts.as_secs().into(),
+                        event_id: Some(original.event_id.to_string()),
                     });
                 }
                 Ok(_) => {} // state events, reactions, etc — skip
@@ -311,6 +318,7 @@ impl Account {
                         sender: "".to_string(),
                         body: "[encrypted message — unable to decrypt]".to_string(),
                         timestamp: 0,
+                        event_id: None,
                     });
                 }
             }
@@ -324,7 +332,17 @@ impl Account {
             messages = messages.split_off(messages.len() - limit as usize);
         }
 
-        Ok(messages)
+        Ok((messages, response.end))
+    }
+
+    /// Fetch recent message history for a room (convenience wrapper)
+    pub async fn fetch_history(
+        &self,
+        room_id: &OwnedRoomId,
+        limit: u32,
+    ) -> Result<Vec<crate::app::DisplayMessage>> {
+        let (msgs, _) = self.fetch_history_paged(room_id, None, limit).await?;
+        Ok(msgs)
     }
 
     /// Send a text message to a room
@@ -479,6 +497,44 @@ impl Account {
     pub fn get_room_topic(&self, room_id: &OwnedRoomId) -> Option<String> {
         let room = self.client.get_room(room_id)?;
         room.topic()
+    }
+
+    /// Edit a message (send a replacement event)
+    pub async fn edit_message(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &str,
+        new_body: &str,
+    ) -> Result<()> {
+        use matrix_sdk::ruma::OwnedEventId;
+        use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
+
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let eid: OwnedEventId = event_id.parse()?;
+        let content = RoomMessageEventContent::text_plain(new_body)
+            .make_replacement(ReplacementMetadata::new(eid, None));
+        room.send(content).await?;
+        Ok(())
+    }
+
+    /// Redact (delete) a message
+    pub async fn redact_message(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &str,
+    ) -> Result<()> {
+        use matrix_sdk::ruma::OwnedEventId;
+
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let eid: OwnedEventId = event_id.parse()?;
+        room.redact(&eid, None, None).await?;
+        Ok(())
     }
 
     /// Recover E2EE secrets using a recovery key (or passphrase)
