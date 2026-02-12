@@ -382,20 +382,41 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(welcome, msg_area);
     } else {
         let msg_height = msg_area.height.saturating_sub(2) as usize;
-        // Each message takes 3 lines (sender + body + blank separator)
-        let msgs_per_page = (msg_height / 3).max(1);
-        app.chat_viewport_msgs.set(msgs_per_page);
+        let inner_width = msg_area.width.saturating_sub(2) as usize; // borders
 
         let end = if app.messages.len() > app.scroll_offset {
             app.messages.len() - app.scroll_offset
         } else {
             app.messages.len()
         };
-        let start = end.saturating_sub(msgs_per_page);
+
+        // Measure messages from the bottom up to find how many actually fit,
+        // accounting for line wrapping
+        let wrapped_height = |text: &str| -> usize {
+            if inner_width == 0 { 1 } else { (text.len().max(1) + inner_width - 1) / inner_width }
+        };
+        let mut used_height = 0usize;
+        let mut start = end;
+        for i in (0..end).rev() {
+            let msg = &app.messages[i];
+            let sender_text = format!("  {}", msg.sender);
+            let body_text = format!("  {}", msg.body);
+            let mut msg_h = wrapped_height(&sender_text) + wrapped_height(&body_text);
+            // Separator line between messages (not after the last one)
+            if i + 1 < end {
+                msg_h += 1;
+            }
+            if used_height + msg_h > msg_height {
+                break;
+            }
+            used_height += msg_h;
+            start = i;
+        }
+        let msgs_per_page = end - start;
+        app.chat_viewport_msgs.set(msgs_per_page.max(1));
 
         let visible_msgs = &app.messages[start..end];
         let msg_count = visible_msgs.len();
-        let inner_width = msg_area.width.saturating_sub(2) as usize; // borders
 
         let mut visible: Vec<Line> = visible_msgs
             .iter()
@@ -434,15 +455,9 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             })
             .collect();
 
-        // Calculate actual rendered height accounting for line wrapping
-        let rendered_height: usize = visible.iter().map(|line| {
-            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            if inner_width == 0 { 1 } else { (line_width.max(1) + inner_width - 1) / inner_width }
-        }).sum();
-
         // Bottom-align: pad top with empty lines so messages anchor to the bottom
-        if rendered_height < msg_height {
-            let padding = msg_height - rendered_height;
+        if used_height < msg_height {
+            let padding = msg_height - used_height;
             let mut padded = vec![Line::from(""); padding];
             padded.append(&mut visible);
             visible = padded;
