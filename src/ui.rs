@@ -1310,7 +1310,18 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
 
 fn draw_recovery_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(50, 12, f.area());
+
+    // Calculate error height for wrapping
+    let base_width = (f.area().width * 70 / 100).min(f.area().width);
+    let err_lines: u16 = if let Some(err) = &app.recovery_error {
+        let avail = base_width.saturating_sub(6) as usize; // borders + padding
+        if avail == 0 { 1 } else { ((err.len() / avail) + 1).min(4) as u16 }
+    } else {
+        1
+    };
+    let height = 9 + err_lines; // 7 fixed rows + error area + borders
+
+    let area = centered_rect(70, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1324,14 +1335,14 @@ fn draw_recovery_overlay(f: &mut Frame, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // padding
-            Constraint::Length(1), // account id
-            Constraint::Length(1), // padding
-            Constraint::Length(1), // label
-            Constraint::Length(1), // input field
-            Constraint::Length(1), // padding
-            Constraint::Length(1), // error or hint
-            Constraint::Length(1), // hint
+            Constraint::Length(1),         // padding
+            Constraint::Length(1),         // account id
+            Constraint::Length(1),         // padding
+            Constraint::Length(1),         // label
+            Constraint::Length(1),         // input field
+            Constraint::Length(1),         // padding
+            Constraint::Length(err_lines), // error (wrapping)
+            Constraint::Length(1),         // hint
         ])
         .split(inner);
 
@@ -1375,9 +1386,9 @@ fn draw_recovery_overlay(f: &mut Frame, app: &App) {
             rows[6],
         );
     } else if let Some(err) = &app.recovery_error {
-        let truncated: String = err.chars().take((inner.width as usize).saturating_sub(4)).collect();
         f.render_widget(
-            Paragraph::new(format!("  {}", truncated))
+            Paragraph::new(format!("  {}", err))
+                .wrap(Wrap { trim: false })
                 .style(Style::default().fg(theme.status_err)),
             rows[6],
         );
