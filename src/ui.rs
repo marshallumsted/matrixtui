@@ -804,13 +804,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_login_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
     let base_width = (f.area().width * 50 / 100).min(f.area().width);
-    let err_lines: u16 = if let Some(err) = &app.login_error {
-        let avail = base_width.saturating_sub(4) as usize;
-        if avail == 0 { 1 } else { ((err.len() / avail) + 1).min(3) as u16 }
-    } else {
-        1
-    };
-    let height = (11 + err_lines).min(f.area().height);
+    let inner_w = base_width.saturating_sub(2); // borders
+    let hs_lines = input_field_lines(&app.login_homeserver, inner_w);
+    let un_lines = input_field_lines(&app.login_username, inner_w);
+    let masked: String = "\u{25cf}".repeat(app.login_password.len());
+    let pw_lines = input_field_lines(&masked, inner_w);
+    let height = (8 + hs_lines + un_lines + pw_lines).min(f.area().height);
 
     let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
@@ -826,16 +825,16 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
     let fields = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // label
-            Constraint::Length(1), // homeserver
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // username
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // password
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),   // error or hint (wrapping)
+            Constraint::Length(1),        // label
+            Constraint::Length(hs_lines), // homeserver
+            Constraint::Length(1),        // spacer
+            Constraint::Length(1),        // label
+            Constraint::Length(un_lines), // username
+            Constraint::Length(1),        // spacer
+            Constraint::Length(1),        // label
+            Constraint::Length(pw_lines), // password
+            Constraint::Length(1),        // spacer
+            Constraint::Min(1),          // error or hint
         ])
         .split(inner);
 
@@ -847,29 +846,19 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
         Paragraph::new("Homeserver:").style(Style::default().fg(theme.text_dim)),
         fields[0],
     );
-    f.render_widget(
-        Paragraph::new(format!(" {}", app.login_homeserver)).style(hs_style),
-        fields[1],
-    );
+    render_input_field(f, &app.login_homeserver, fields[1], hs_style, !app.login_busy && app.login_focus == 0);
 
     f.render_widget(
         Paragraph::new("Username:").style(Style::default().fg(theme.text_dim)),
         fields[3],
     );
-    f.render_widget(
-        Paragraph::new(format!(" {}", app.login_username)).style(un_style),
-        fields[4],
-    );
+    render_input_field(f, &app.login_username, fields[4], un_style, !app.login_busy && app.login_focus == 1);
 
     f.render_widget(
         Paragraph::new("Password:").style(Style::default().fg(theme.text_dim)),
         fields[6],
     );
-    let masked: String = "\u{25cf}".repeat(app.login_password.len());
-    f.render_widget(
-        Paragraph::new(format!(" {}", masked)).style(pw_style),
-        fields[7],
-    );
+    render_input_field(f, &masked, fields[7], pw_style, !app.login_busy && app.login_focus == 2);
 
     // Error or hint
     let hint = if let Some(err) = &app.login_error {
@@ -886,17 +875,6 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[9]);
-
-    // Cursor position
-    if !app.login_busy {
-        let (cursor_row, cursor_col) = match app.login_focus {
-            0 => (fields[1].y, fields[1].x + 1 + app.login_homeserver.len() as u16),
-            1 => (fields[4].y, fields[4].x + 1 + app.login_username.len() as u16),
-            2 => (fields[7].y, fields[7].x + 1 + app.login_password.len() as u16),
-            _ => (0, 0),
-        };
-        f.set_cursor_position((cursor_col, cursor_row));
-    }
 }
 
 fn draw_help_overlay(f: &mut Frame, app: &App) {
@@ -986,14 +964,7 @@ fn draw_switcher_overlay(f: &mut Frame, app: &App) {
         .split(inner);
 
     // Search input
-    f.render_widget(
-        Paragraph::new(format!(" > {}", app.switcher_query)),
-        layout[0],
-    );
-    f.set_cursor_position((
-        layout[0].x + 4 + app.switcher_query.len() as u16,
-        layout[0].y,
-    ));
+    render_input_field(f, &format!("> {}", app.switcher_query), layout[0], Style::default(), true);
 
     // Separator
     f.render_widget(
@@ -1331,8 +1302,12 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
 
 fn draw_profile_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let err_lines: u16 = if app.profile_error.is_some() { 2 } else { 1 };
-    let height = (15 + err_lines).min(f.area().height);
+    let base_width = (f.area().width * 50 / 100).min(f.area().width);
+    let inner_w = base_width.saturating_sub(2);
+    let dn_lines = input_field_lines(&app.profile_display_name, inner_w);
+    let au_lines = input_field_lines(&app.profile_avatar_url, inner_w);
+    let ap_lines = input_field_lines(&app.profile_avatar_path, inner_w);
+    let height = (14 + dn_lines + au_lines + ap_lines).min(f.area().height);
     let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
@@ -1347,20 +1322,20 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
     let fields = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // user id
-            Constraint::Length(1), // current name
-            Constraint::Length(1), // current avatar
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // display name field
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // avatar url field
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // avatar path field
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),   // error/hint (wrapping)
+            Constraint::Length(1),        // user id
+            Constraint::Length(1),        // current name
+            Constraint::Length(1),        // current avatar
+            Constraint::Length(1),        // spacer
+            Constraint::Length(1),        // label
+            Constraint::Length(dn_lines), // display name field
+            Constraint::Length(1),        // spacer
+            Constraint::Length(1),        // label
+            Constraint::Length(au_lines), // avatar url field
+            Constraint::Length(1),        // spacer
+            Constraint::Length(1),        // label
+            Constraint::Length(ap_lines), // avatar path field
+            Constraint::Length(1),        // spacer
+            Constraint::Min(1),          // error/hint
         ])
         .split(inner);
 
@@ -1378,7 +1353,7 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
             .style(Style::default().fg(theme.text_dim)),
         fields[1],
     );
-    let max_avatar = (inner.width as usize).saturating_sub(12); // "  Avatar: " + margin
+    let max_avatar = (inner.width as usize).saturating_sub(12);
     let avatar_display = if app.profile_current_avatar.len() > max_avatar && max_avatar > 3 {
         format!("{}...", &app.profile_current_avatar[..max_avatar.saturating_sub(3)])
     } else {
@@ -1393,31 +1368,25 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
     let s0 = field_style(app.profile_focus == 0, theme);
     let s1 = field_style(app.profile_focus == 1, theme);
     let s2 = field_style(app.profile_focus == 2, theme);
+    let cursor_ok = !app.profile_busy;
 
     f.render_widget(
         Paragraph::new("  Display Name:").style(Style::default().fg(theme.text_dim)),
         fields[4],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.profile_display_name)).style(s0),
-        fields[5],
-    );
+    render_input_field(f, &app.profile_display_name, fields[5], s0, cursor_ok && app.profile_focus == 0);
+
     f.render_widget(
         Paragraph::new("  Avatar MXC URL:").style(Style::default().fg(theme.text_dim)),
         fields[7],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.profile_avatar_url)).style(s1),
-        fields[8],
-    );
+    render_input_field(f, &app.profile_avatar_url, fields[8], s1, cursor_ok && app.profile_focus == 1);
+
     f.render_widget(
         Paragraph::new("  Upload Avatar (file path):").style(Style::default().fg(theme.text_dim)),
         fields[10],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.profile_avatar_path)).style(s2),
-        fields[11],
-    );
+    render_input_field(f, &app.profile_avatar_path, fields[11], s2, cursor_ok && app.profile_focus == 2);
 
     let hint = if let Some(err) = &app.profile_error {
         Paragraph::new(format!("  {}", err))
@@ -1433,22 +1402,16 @@ fn draw_profile_overlay(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[13]);
-
-    if !app.profile_busy {
-        let (row, col) = match app.profile_focus {
-            0 => (fields[5].y, fields[5].x + 2 + app.profile_display_name.len() as u16),
-            1 => (fields[8].y, fields[8].x + 2 + app.profile_avatar_url.len() as u16),
-            2 => (fields[11].y, fields[11].x + 2 + app.profile_avatar_path.len() as u16),
-            _ => (0, 0),
-        };
-        f.set_cursor_position((col, row));
-    }
 }
 
 fn draw_creator_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let err_lines: u16 = if app.creator_error.is_some() { 2 } else { 1 };
-    let height = (17 + err_lines).min(f.area().height);
+    let base_width = (f.area().width * 50 / 100).min(f.area().width);
+    let inner_w = base_width.saturating_sub(2);
+    let nm_lines = input_field_lines(&app.creator_name, inner_w);
+    let tp_lines = input_field_lines(&app.creator_topic, inner_w);
+    let inv_lines = input_field_lines(&app.creator_invite, inner_w);
+    let height = (16 + nm_lines + tp_lines + inv_lines).min(f.area().height);
     let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
@@ -1463,22 +1426,22 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
     let fields = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // account selector
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // name field
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // topic field
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // visibility
-            Constraint::Length(1), // encryption
-            Constraint::Length(1), // federated
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // invite field
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),   // error/hint (wrapping)
+            Constraint::Length(1),         // account selector
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // label
+            Constraint::Length(nm_lines),  // name field
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // label
+            Constraint::Length(tp_lines),  // topic field
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // visibility
+            Constraint::Length(1),         // encryption
+            Constraint::Length(1),         // federated
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // label
+            Constraint::Length(inv_lines), // invite field
+            Constraint::Length(1),         // spacer
+            Constraint::Min(1),           // error/hint
         ])
         .split(inner);
 
@@ -1503,23 +1466,19 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
     let s1 = field_style(app.creator_focus == 1, theme);
     let s2 = field_style(app.creator_focus == 2, theme);
     let s6 = field_style(app.creator_focus == 6, theme);
+    let cursor_ok = !app.creator_busy;
 
     f.render_widget(
         Paragraph::new("  Name:").style(Style::default().fg(theme.text_dim)),
         fields[2],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.creator_name)).style(s1),
-        fields[3],
-    );
+    render_input_field(f, &app.creator_name, fields[3], s1, cursor_ok && app.creator_focus == 1);
+
     f.render_widget(
         Paragraph::new("  Topic:").style(Style::default().fg(theme.text_dim)),
         fields[5],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.creator_topic)).style(s2),
-        fields[6],
-    );
+    render_input_field(f, &app.creator_topic, fields[6], s2, cursor_ok && app.creator_focus == 2);
 
     let vis_label = if app.creator_visibility == 1 { "Public" } else { "Private" };
     let vis_style = if app.creator_focus == 3 {
@@ -1558,10 +1517,7 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
         Paragraph::new("  Invite (comma-separated):").style(Style::default().fg(theme.text_dim)),
         fields[12],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.creator_invite)).style(s6),
-        fields[13],
-    );
+    render_input_field(f, &app.creator_invite, fields[13], s6, cursor_ok && app.creator_focus == 6);
 
     let hint = if let Some(err) = &app.creator_error {
         Paragraph::new(format!("  {}", err))
@@ -1577,22 +1533,16 @@ fn draw_creator_overlay(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[15]);
-
-    if !app.creator_busy {
-        let (row, col) = match app.creator_focus {
-            1 => (fields[3].y, fields[3].x + 2 + app.creator_name.len() as u16),
-            2 => (fields[6].y, fields[6].x + 2 + app.creator_topic.len() as u16),
-            6 => (fields[13].y, fields[13].x + 2 + app.creator_invite.len() as u16),
-            _ => return, // toggle/selector fields — no cursor
-        };
-        f.set_cursor_position((col, row));
-    }
 }
 
 fn draw_editor_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let err_lines: u16 = if app.editor_error.is_some() { 2 } else { 1 };
-    let height = (16 + err_lines).min(f.area().height);
+    let base_width = (f.area().width * 50 / 100).min(f.area().width);
+    let inner_w = base_width.saturating_sub(2);
+    let nm_lines = input_field_lines(&app.editor_name, inner_w);
+    let tp_lines = input_field_lines(&app.editor_topic, inner_w);
+    let inv_lines = input_field_lines(&app.editor_invite_user, inner_w);
+    let height = (15 + nm_lines + tp_lines + inv_lines).min(f.area().height);
     let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
 
@@ -1607,21 +1557,21 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
     let fields = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // room header
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // name field
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // topic field
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // label
-            Constraint::Length(1), // invite field
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // leave button
-            Constraint::Length(1), // delete button
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),   // error/hint (wrapping)
+            Constraint::Length(1),         // room header
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // label
+            Constraint::Length(nm_lines),  // name field
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // label
+            Constraint::Length(tp_lines),  // topic field
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // label
+            Constraint::Length(inv_lines), // invite field
+            Constraint::Length(1),         // spacer
+            Constraint::Length(1),         // leave button
+            Constraint::Length(1),         // delete button
+            Constraint::Length(1),         // spacer
+            Constraint::Min(1),           // error/hint
         ])
         .split(inner);
 
@@ -1642,31 +1592,25 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
     let s0 = field_style(app.editor_focus == 0, theme);
     let s1 = field_style(app.editor_focus == 1, theme);
     let s2 = field_style(app.editor_focus == 2, theme);
+    let cursor_ok = !app.editor_busy;
 
     f.render_widget(
         Paragraph::new("  Room Name:").style(Style::default().fg(theme.text_dim)),
         fields[2],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.editor_name)).style(s0),
-        fields[3],
-    );
+    render_input_field(f, &app.editor_name, fields[3], s0, cursor_ok && app.editor_focus == 0);
+
     f.render_widget(
         Paragraph::new("  Topic:").style(Style::default().fg(theme.text_dim)),
         fields[5],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.editor_topic)).style(s1),
-        fields[6],
-    );
+    render_input_field(f, &app.editor_topic, fields[6], s1, cursor_ok && app.editor_focus == 1);
+
     f.render_widget(
         Paragraph::new("  Invite User:").style(Style::default().fg(theme.text_dim)),
         fields[8],
     );
-    f.render_widget(
-        Paragraph::new(format!("  {}", app.editor_invite_user)).style(s2),
-        fields[9],
-    );
+    render_input_field(f, &app.editor_invite_user, fields[9], s2, cursor_ok && app.editor_focus == 2);
 
     // Leave button
     let leave_style = if app.editor_focus == 3 {
@@ -1726,30 +1670,21 @@ fn draw_editor_overlay(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false })
     };
     f.render_widget(hint, fields[14]);
-
-    if !app.editor_busy {
-        let (row, col) = match app.editor_focus {
-            0 => (fields[3].y, fields[3].x + 2 + app.editor_name.len() as u16),
-            1 => (fields[6].y, fields[6].x + 2 + app.editor_topic.len() as u16),
-            2 => (fields[9].y, fields[9].x + 2 + app.editor_invite_user.len() as u16),
-            _ => return, // buttons — no cursor
-        };
-        f.set_cursor_position((col, row));
-    }
 }
 
 fn draw_recovery_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
 
-    // Calculate error height for wrapping
     let base_width = (f.area().width * 70 / 100).min(f.area().width);
+    let inner_w = base_width.saturating_sub(2);
+    let key_lines = input_field_lines(&app.recovery_key, inner_w);
     let err_lines: u16 = if let Some(err) = &app.recovery_error {
-        let avail = base_width.saturating_sub(6) as usize; // borders + padding
+        let avail = inner_w.saturating_sub(4) as usize;
         if avail == 0 { 1 } else { ((err.len() / avail) + 1).min(4) as u16 }
     } else {
         1
     };
-    let height = 9 + err_lines; // 7 fixed rows + error area + borders
+    let height = (8 + key_lines + err_lines).min(f.area().height);
 
     let area = centered_rect(70, height, f.area());
     f.render_widget(Clear, area);
@@ -1765,14 +1700,14 @@ fn draw_recovery_overlay(f: &mut Frame, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),         // padding
-            Constraint::Length(1),         // account id
-            Constraint::Length(1),         // padding
-            Constraint::Length(1),         // label
-            Constraint::Length(1),         // input field
-            Constraint::Length(1),         // padding
-            Constraint::Length(err_lines), // error (wrapping)
-            Constraint::Length(1),         // hint
+            Constraint::Length(1),          // padding
+            Constraint::Length(1),          // account id
+            Constraint::Length(1),          // padding
+            Constraint::Length(1),          // label
+            Constraint::Length(key_lines),  // input field
+            Constraint::Length(1),          // padding
+            Constraint::Length(err_lines),  // error
+            Constraint::Length(1),          // hint
         ])
         .split(inner);
 
@@ -1794,20 +1729,8 @@ fn draw_recovery_overlay(f: &mut Frame, app: &App) {
         rows[3],
     );
 
-    // Input field
-    let display_val = if app.recovery_key.is_empty() {
-        " ".to_string()
-    } else {
-        app.recovery_key.clone()
-    };
-    f.render_widget(
-        Paragraph::new(format!("  {}", display_val)).style(field_style(true, theme)),
-        rows[4],
-    );
-
-    // Cursor
-    let cursor_x = inner.x + 2 + app.recovery_key.len() as u16;
-    f.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), rows[4].y));
+    // Input field with wrapping
+    render_input_field(f, &app.recovery_key, rows[4], field_style(true, theme), !app.recovery_busy);
 
     // Error or busy
     if app.recovery_busy {
@@ -2030,6 +1953,43 @@ fn field_style(focused: bool, theme: &Theme) -> Style {
         Style::default().fg(theme.text).bg(theme.highlight_bg)
     } else {
         Style::default().fg(theme.text_dim)
+    }
+}
+
+/// Calculate how many visual lines an input field needs with "  " indent wrapping
+fn input_field_lines(text: &str, width: u16) -> u16 {
+    let w = (width as usize).saturating_sub(2).max(1); // 2 = "  " indent
+    let chars = text.chars().count();
+    if chars == 0 { 1 } else { ((chars + w - 1) / w) as u16 }
+}
+
+/// Render a text input field with character-exact wrapping and "  " indent on every line.
+/// If `show_cursor` is true, places the cursor at the end of the text.
+fn render_input_field(f: &mut Frame, text: &str, area: Rect, style: Style, show_cursor: bool) {
+    let indent = "  ";
+    let indent_w = 2usize;
+    let content_w = (area.width as usize).saturating_sub(indent_w).max(1);
+    let chars: Vec<char> = text.chars().collect();
+    let lines: Vec<Line> = if chars.is_empty() {
+        vec![Line::from(indent.to_string())]
+    } else {
+        chars
+            .chunks(content_w)
+            .map(|chunk| Line::from(format!("{}{}", indent, chunk.iter().collect::<String>())))
+            .collect()
+    };
+    f.render_widget(Paragraph::new(lines).style(style), area);
+
+    if show_cursor {
+        let char_count = chars.len();
+        let cursor_row = char_count / content_w;
+        let cursor_col = indent_w + char_count % content_w;
+        let cursor_x = area.x + cursor_col as u16;
+        let cursor_y = area.y + cursor_row as u16;
+        f.set_cursor_position((
+            cursor_x.min(area.right().saturating_sub(1)),
+            cursor_y.min(area.bottom().saturating_sub(1)),
+        ));
     }
 }
 
