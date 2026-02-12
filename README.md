@@ -4,63 +4,13 @@ Multi-account terminal Matrix client. Simultaneous connections to multiple homes
 
 ## Install
 
-### Prerequisites
-
-**Arch:**
-```
-sudo pacman -S base-devel rust git
-```
-
-**Debian/Ubuntu:**
-```
-sudo apt install build-essential libssl-dev pkg-config git curl
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-**Fedora:**
-```
-sudo dnf install gcc openssl-devel pkg-config git
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-**macOS:**
-```
-xcode-select --install
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-**Termux (Android):**
-```
-pkg install rust git binutils
-```
-
-> **Note:** Make sure `~/.cargo/bin` is in your PATH. If not, add it:
-> - **bash/zsh:** `echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc`
-> - **fish:** `fish_add_path ~/.cargo/bin`
-
-### Install
-
-```
-git clone https://github.com/starlessoblivion/matrixtui.git
-cd matrixtui
-cargo install --path .
-```
-
-Then run `mtui` from anywhere.
-
-### Install from GitHub (no clone)
+Install [Rust](https://rustup.rs), then:
 
 ```
 cargo install --git https://github.com/starlessoblivion/matrixtui.git
 ```
 
-### Update
-
-```
-cd matrixtui
-git pull
-cargo install --path .
-```
+Run with `mtui`. To update, run the same command again.
 
 ## Usage
 
