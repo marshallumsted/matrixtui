@@ -1487,10 +1487,20 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         .unwrap_or_default();
 
     if app.message_editing {
-        // Edit mode: show text editor
+        // Edit mode: show text editor with wrapping
+        let edit_width: u16 = 60;
+        // Calculate how many lines the edit text wraps to
+        let text_inner_width = (edit_width as usize).saturating_sub(2 + 2); // borders + 2-char padding
+        let text_lines = if text_inner_width == 0 {
+            1
+        } else {
+            let len = app.message_edit_text.len();
+            if len == 0 { 1 } else { (len + text_inner_width - 1) / text_inner_width }
+        };
+        let edit_area_lines = text_lines.clamp(1, 10) as u16;
         let err_lines: u16 = if app.message_edit_error.is_some() { 2 } else { 0 };
-        let height = 10 + err_lines;
-        let area = centered_rect(60, height, f.area());
+        let height = 6 + edit_area_lines + err_lines; // padding+preview+padding+label+edit+padding+hint
+        let area = centered_rect(edit_width, height, f.area());
         f.render_widget(Clear, area);
 
         let block = Block::default()
@@ -1504,13 +1514,13 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // padding
-                Constraint::Length(1), // original preview
-                Constraint::Length(1), // padding
-                Constraint::Length(1), // label
-                Constraint::Length(1), // input field
-                Constraint::Length(1), // padding
-                Constraint::Min(1),   // error or hint
+                Constraint::Length(1),              // padding
+                Constraint::Length(1),              // original preview
+                Constraint::Length(1),              // padding
+                Constraint::Length(1),              // label
+                Constraint::Length(edit_area_lines), // input field (multi-line)
+                Constraint::Length(1),              // padding
+                Constraint::Min(1),                 // error or hint
             ])
             .split(inner);
 
@@ -1527,13 +1537,24 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
 
         f.render_widget(
             Paragraph::new(format!("  {}", app.message_edit_text))
-                .style(field_style(true, theme)),
+                .style(field_style(true, theme))
+                .wrap(Wrap { trim: false }),
             rows[4],
         );
 
-        // Cursor
-        let cursor_x = inner.x + 2 + app.message_edit_text.len() as u16;
-        f.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), rows[4].y));
+        // Calculate cursor position accounting for wrapping
+        let cursor_offset = app.message_edit_cursor;
+        let chars_per_row = text_inner_width.max(1);
+        // +2 for the "  " prefix padding
+        let effective_offset = cursor_offset + 2;
+        let cursor_row = effective_offset / chars_per_row;
+        let cursor_col = effective_offset % chars_per_row;
+        let cursor_x = rows[4].x + cursor_col as u16;
+        let cursor_y = rows[4].y + cursor_row as u16;
+        f.set_cursor_position((
+            cursor_x.min(inner.right().saturating_sub(1)),
+            cursor_y.min(rows[4].bottom().saturating_sub(1)),
+        ));
 
         if app.message_edit_busy {
             f.render_widget(

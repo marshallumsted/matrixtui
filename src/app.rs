@@ -185,6 +185,7 @@ pub struct App {
     pub message_action_selected: usize, // 0=Edit, 1=Delete
     pub message_editing: bool,
     pub message_edit_text: String,
+    pub message_edit_cursor: usize,
     pub message_edit_error: Option<String>,
     pub message_edit_busy: bool,
 
@@ -286,6 +287,7 @@ impl App {
             message_action_selected: 0,
             message_editing: false,
             message_edit_text: String::new(),
+            message_edit_cursor: 0,
             message_edit_error: None,
             message_edit_busy: false,
             room_history_tokens: HashMap::new(),
@@ -1066,6 +1068,7 @@ impl App {
                 self.message_action_selected = 0;
                 self.message_editing = false;
                 self.message_edit_text = self.messages[idx].body.clone();
+                self.message_edit_cursor = self.message_edit_text.len();
                 self.message_edit_error = None;
                 self.message_edit_busy = false;
                 self.overlay = Overlay::MessageAction;
@@ -1089,11 +1092,30 @@ impl App {
                     self.message_edit_error = None;
                 }
                 KeyCode::Char(c) => {
-                    self.message_edit_text.push(c);
+                    self.message_edit_text.insert(self.message_edit_cursor, c);
+                    self.message_edit_cursor += 1;
                 }
                 KeyCode::Backspace => {
-                    self.message_edit_text.pop();
+                    if self.message_edit_cursor > 0 {
+                        self.message_edit_cursor -= 1;
+                        self.message_edit_text.remove(self.message_edit_cursor);
+                    }
                 }
+                KeyCode::Delete => {
+                    if self.message_edit_cursor < self.message_edit_text.len() {
+                        self.message_edit_text.remove(self.message_edit_cursor);
+                    }
+                }
+                KeyCode::Left => {
+                    self.message_edit_cursor = self.message_edit_cursor.saturating_sub(1);
+                }
+                KeyCode::Right => {
+                    if self.message_edit_cursor < self.message_edit_text.len() {
+                        self.message_edit_cursor += 1;
+                    }
+                }
+                KeyCode::Home => self.message_edit_cursor = 0,
+                KeyCode::End => self.message_edit_cursor = self.message_edit_text.len(),
                 _ => {}
             }
             return;
@@ -1120,6 +1142,7 @@ impl App {
                                     return;
                                 }
                                 self.message_editing = true;
+                                self.message_edit_cursor = self.message_edit_text.len();
                                 self.message_edit_error = None;
                             }
                         }
