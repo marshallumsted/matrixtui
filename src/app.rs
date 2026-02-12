@@ -1382,9 +1382,17 @@ impl App {
         self.login_error = None;
 
         // Check if already logged in to this homeserver with this username
-        let check_id = format!("@{}:{}", self.login_username, self.login_homeserver);
-        if self.accounts.iter().any(|a| a.user_id == check_id || a.user_id == self.login_username) {
-            self.login_error = Some("Already logged in to this account".to_string());
+        let user = self.login_username.trim();
+        let hs = self.login_homeserver.trim();
+        let check_id = format!("@{}:{}", user, hs);
+        let check_id_stripped = format!("@{}:{}", user.trim_start_matches('@'), hs);
+        if self.accounts.iter().any(|a| {
+            a.user_id == check_id
+                || a.user_id == check_id_stripped
+                || a.user_id == user
+                || a.homeserver == hs && a.user_id.starts_with(&format!("@{}:", user.trim_start_matches('@')))
+        }) {
+            self.login_error = Some("Already logged in — use Verify Session to recover E2EE keys".to_string());
             self.login_busy = false;
             return;
         }

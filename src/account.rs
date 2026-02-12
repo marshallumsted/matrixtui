@@ -70,7 +70,13 @@ impl Account {
         password: &str,
     ) -> Result<(Self, SavedAccount)> {
         let url = normalize_homeserver(homeserver);
-        let db_path = session_db_path(username, homeserver);
+        // Normalize to @user:server format so db path matches restore()
+        let normalized_id = if username.starts_with('@') {
+            username.to_string()
+        } else {
+            format!("@{}:{}", username, homeserver)
+        };
+        let db_path = session_db_path(&normalized_id, homeserver);
         std::fs::create_dir_all(&db_path)?;
 
         let client = Client::builder()
