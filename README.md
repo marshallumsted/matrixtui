@@ -46,7 +46,7 @@ Data is stored in `~/.config/matrixtui/`:
 
 ### Login credentials
 
-Your **password** is sent directly to your homeserver over HTTPS and is **never written to disk**. It is held in memory only during the login request and cleared immediately after. MatrixTUI does not store, log, or transmit your password anywhere else.
+Your **password** is sent directly to your selected server over HTTPS and is **never written to the local device disk**. It is held in memory only during the login request and cleared immediately after. MatrixTUI does not store, log, or transmit your password anywhere else.
 
 On successful login the homeserver returns a **session access token**. This token is saved in plaintext in `~/.config/matrixtui/config.json` so the client can restore your session without re-entering your password. The access token grants full account access until revoked. **Protect this file** — anyone who can read it can act as your account. You can revoke a session token from another Matrix client (Element: Settings > Sessions) or by removing the account in MatrixTUI settings, which deletes the token from the config.
 
