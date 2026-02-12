@@ -329,7 +329,9 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme.dimmed)
     };
 
-    let title = if let Some(room_id) = &app.active_room {
+    let title = if app.downloading_keys {
+        " Downloading room keys... ".to_string()
+    } else if let Some(room_id) = &app.active_room {
         if let Some(room) = app.all_rooms.iter().find(|r| &r.id == room_id) {
             format!(" {} · {} ", room.name, room.account_id)
         } else {
@@ -337,6 +339,12 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         }
     } else {
         " Chat ".to_string()
+    };
+
+    let title_style = if app.downloading_keys {
+        Style::default().fg(theme.status_ok).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
     };
 
     // Calculate input box height based on wrapped text
@@ -362,9 +370,9 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
 
     // Messages
     let msg_block = Block::default()
-        .title(title)
+        .title(Span::styled(title, title_style))
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(if app.downloading_keys { Style::default().fg(theme.status_ok) } else { border_style });
 
     if app.messages.is_empty() && app.active_room.is_none() {
         let welcome = Paragraph::new("\n  Select a room to start chatting\n\n  Ctrl+K  quick room switcher\n  a       add account\n  n       new room\n  e       edit active room\n  s       settings\n  ?       help")

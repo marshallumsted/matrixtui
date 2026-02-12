@@ -101,6 +101,7 @@ pub struct App {
     pub scroll_offset: usize,
     pub room_messages: HashMap<OwnedRoomId, Vec<DisplayMessage>>,
     pending_echoes: Vec<String>,
+    pub downloading_keys: bool,
 
     // Input state
     pub input: String,
@@ -207,6 +208,7 @@ impl App {
             scroll_offset: 0,
             room_messages: HashMap::new(),
             pending_echoes: Vec::new(),
+            downloading_keys: false,
             input: String::new(),
             cursor_pos: 0,
             login_homeserver: String::new(),
@@ -1552,6 +1554,25 @@ impl App {
                     }
                 }
             }
+            MatrixEvent::KeysDownloaded { room_id, account_id } => {
+                self.downloading_keys = false;
+                // Re-fetch history if we're still viewing this room
+                if self.active_room.as_ref() == Some(&room_id)
+                    && self.active_account_id.as_deref() == Some(&account_id)
+                {
+                    if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+                        match account.fetch_history(&room_id, 50).await {
+                            Ok(msgs) if !msgs.is_empty() => {
+                                let count = msgs.len();
+                                let decrypted = msgs.iter().filter(|m| !m.body.contains("[encrypted message")).count();
+                                self.messages = msgs;
+                                self.status_msg = format!("Decrypted {}/{} messages", decrypted, count);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             MatrixEvent::SyncError { account_id, error } => {
                 if let Some(acct) = self.accounts.iter_mut().find(|a| a.user_id == account_id) {
                     acct.syncing = false;
@@ -1669,11 +1690,32 @@ impl App {
                 match account.fetch_history(&room_id, 50).await {
                     Ok(msgs) if !msgs.is_empty() => {
                         let count = msgs.len();
+                        let has_encrypted = msgs.iter().any(|m| m.body.contains("[encrypted message"));
                         self.messages = msgs;
-                        self.status_msg = format!(
-                            "{} ({}) — {} messages",
-                            room_name, account_id, count
-                        );
+                        if has_encrypted {
+                            // Encrypted messages found — SDK will auto-download keys
+                            // Schedule a delayed re-fetch to pick up decrypted content
+                            self.downloading_keys = true;
+                            self.status_msg = format!(
+                                "{} — downloading room keys...",
+                                room_name
+                            );
+                            let tx = self.matrix_tx.clone();
+                            let rid = room_id.clone();
+                            let aid = account_id.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                let _ = tx.send(MatrixEvent::KeysDownloaded {
+                                    room_id: rid,
+                                    account_id: aid,
+                                });
+                            });
+                        } else {
+                            self.status_msg = format!(
+                                "{} ({}) — {} messages",
+                                room_name, account_id, count
+                            );
+                        }
                     }
                     Ok(_) => {
                         // fetch_history returned empty — fall back to cached messages from sync

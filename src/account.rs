@@ -3,6 +3,7 @@ use matrix_sdk::{
     Client, Room, SessionMeta, SessionTokens,
     authentication::matrix::MatrixSession,
     config::SyncSettings,
+    encryption::{BackupDownloadStrategy, EncryptionSettings},
     room::MessagesOptions,
     ruma::{
         OwnedRoomId, OwnedUserId, UserId,
@@ -39,6 +40,10 @@ pub enum MatrixEvent {
         error: String,
     },
     SyncComplete {
+        account_id: String,
+    },
+    KeysDownloaded {
+        room_id: OwnedRoomId,
         account_id: String,
     },
 }
@@ -84,6 +89,7 @@ impl Account {
         let client = Client::builder()
             .homeserver_url(&url)
             .sqlite_store(&db_path, None)
+            .with_encryption_settings(e2ee_settings())
             .build()
             .await?;
 
@@ -123,6 +129,7 @@ impl Account {
         let client = Client::builder()
             .homeserver_url(&url)
             .sqlite_store(&db_path, None)
+            .with_encryption_settings(e2ee_settings())
             .build()
             .await?;
 
@@ -527,6 +534,14 @@ pub fn clear_session_cache(username: &str, homeserver: &str) -> std::io::Result<
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+fn e2ee_settings() -> EncryptionSettings {
+    EncryptionSettings {
+        backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
+        auto_enable_backups: true,
+        ..Default::default()
     }
 }
 
