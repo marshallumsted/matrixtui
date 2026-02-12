@@ -1841,16 +1841,14 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
         .unwrap_or_default();
 
     if app.message_editing {
-        // Edit mode: show text editor with wrapping
-        // Use percentage-based width, compute inner width from actual area
+        // Edit mode: show text editor with character-exact wrapping
         let base_width = (f.area().width * 60 / 100).max(20).min(f.area().width);
-        let text_inner_width = (base_width as usize).saturating_sub(2); // borders only ("  " prefix is text content)
-        let text_lines = if text_inner_width == 0 {
-            1
-        } else {
-            let len = app.message_edit_text.chars().count() + 2; // +2 for "  " prefix
-            if len == 0 { 1 } else { (len + text_inner_width - 1) / text_inner_width }
-        };
+        // inner width = base_width - 2 (borders), which is the actual widget width
+        let widget_width = (base_width as usize).saturating_sub(2);
+        let full_text = format!("  {}", app.message_edit_text);
+        let full_chars: Vec<char> = full_text.chars().collect();
+        let w = widget_width.max(1);
+        let text_lines = if full_chars.is_empty() { 1 } else { (full_chars.len() + w - 1) / w };
         let edit_area_lines = text_lines.clamp(1, 10) as u16;
         let err_lines: u16 = if app.message_edit_error.is_some() { 2 } else { 0 };
         let height = (6 + edit_area_lines + err_lines).min(f.area().height);
@@ -1890,20 +1888,22 @@ fn draw_message_action_overlay(f: &mut Frame, app: &App) {
             rows[3],
         );
 
+        // Manual character-exact line breaking (no word wrap) so cursor math matches
+        let edit_w = rows[4].width as usize;
+        let edit_lines: Vec<Line> = full_chars
+            .chunks(edit_w.max(1))
+            .map(|chunk| Line::from(chunk.iter().collect::<String>()))
+            .collect();
         f.render_widget(
-            Paragraph::new(format!("  {}", app.message_edit_text))
-                .style(field_style(true, theme))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(edit_lines).style(field_style(true, theme)),
             rows[4],
         );
 
-        // Calculate cursor position accounting for wrapping (use char count, not bytes)
+        // Cursor position uses the same width as the manual line breaking
         let cursor_char_pos = app.message_edit_text[..app.message_edit_cursor].chars().count();
-        let chars_per_row = text_inner_width.max(1);
-        // +2 for the "  " prefix
-        let effective_offset = cursor_char_pos + 2;
-        let cursor_row = effective_offset / chars_per_row;
-        let cursor_col = effective_offset % chars_per_row;
+        let effective_offset = cursor_char_pos + 2; // +2 for "  " prefix
+        let cursor_row = effective_offset / edit_w.max(1);
+        let cursor_col = effective_offset % edit_w.max(1);
         let cursor_x = rows[4].x + cursor_col as u16;
         let cursor_y = rows[4].y + cursor_row as u16;
         f.set_cursor_position((

@@ -1349,11 +1349,15 @@ impl App {
     /// Get context-sensitive action labels for the selected message
     pub fn message_action_labels(&self) -> Vec<&'static str> {
         match self.selected_message.and_then(|i| self.messages.get(i)) {
-            Some(msg) => match &msg.content {
-                MessageContent::Text(_) => vec!["Edit Message", "Delete Message"],
-                _ => vec!["Download", "Delete Message"],
-            },
-            None => vec!["Edit Message", "Delete Message"],
+            Some(msg) => {
+                let is_own = self.active_account_id.as_deref() == Some(&msg.sender);
+                match (&msg.content, is_own) {
+                    (MessageContent::Text(_), true) => vec!["Edit Message", "Delete Message"],
+                    (MessageContent::Text(_), false) => vec!["Delete Message"],
+                    _ => vec!["Download", "Delete Message"],
+                }
+            }
+            None => vec!["Delete Message"],
         }
     }
 
