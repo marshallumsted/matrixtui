@@ -1,6 +1,6 @@
 # MatrixTUI
 
-Multi-account terminal Matrix client. Simultaneous connections to multiple homeservers in a single responsive TUI.
+Multi-account terminal Matrix client. Simultaneous connections to multiple servers in a single responsive TUI.
 
 ## Install
 
@@ -48,13 +48,13 @@ Data is stored in `~/.config/matrixtui/`:
 
 Your **password** is sent directly to your selected server over HTTPS and is **never written to the local device disk**. It is held in memory only during the login request and cleared immediately after. MatrixTUI does not store, log, or transmit your password anywhere else.
 
-On successful login the homeserver returns a **session access token**. This token is saved in plaintext in `~/.config/matrixtui/config.json` so the client can restore your session without re-entering your password. The access token grants full account access until revoked. **Protect this file** — anyone who can read it can act as your account. You can revoke a session token from another Matrix client (Element: Settings > Sessions) or by removing the account in MatrixTUI settings, which deletes the token from the config.
+On successful login the server returns a **session access token**. This token is saved in plaintext in `~/.config/matrixtui/config.json` so the client can restore your session without re-entering your password. The access token grants full account access until revoked. **Protect this file** — anyone who can read it can act as your account. You can revoke a session token from another Matrix client (Element: Settings > Sessions) or by removing the account in MatrixTUI settings, which deletes the token from the config.
 
 ### End-to-end encryption (E2EE)
 
 All encrypted rooms use the Matrix E2EE protocol (Olm/Megolm) via [matrix-rust-sdk](https://github.com/nickel-org/matrix-rust-sdk). Encryption keys, cross-signing keys, and sync state are stored in **unencrypted SQLite databases** under `~/.local/share/matrixtui/sessions/<account>/`. These files contain the cryptographic material needed to decrypt your message history. **Protect this directory** — if an attacker copies these files they can decrypt messages from your sessions.
 
-Messages are decrypted in memory for display and are **never cached to disk** by MatrixTUI. When you close the client, decrypted message content only persists on the homeserver (encrypted) and in the SQLite key store (keys only, not message content).
+Messages are decrypted in memory for display and are **never cached to disk** by MatrixTUI. When you close the client, decrypted message content only persists on the server (encrypted) and in the SQLite key store (keys only, not message content).
 
 ### Session verification (recovery key)
 
@@ -74,7 +74,7 @@ Recommended: set restrictive permissions on both directories (`chmod 700`). If y
 - Passwords (only used during initial login API call)
 - Recovery keys (used once, then discarded)
 - Decrypted message content (only held in memory)
-- Your homeserver password in any log file
+- Your server password in any log file
 
 ## Target Platforms
 
