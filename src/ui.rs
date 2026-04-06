@@ -138,6 +138,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::SasVerify => draw_sas_verify_overlay(f, app),
         Overlay::EmojiPicker => draw_emoji_picker_overlay(f, app),
         Overlay::RoomInfo => draw_room_info_overlay(f, app),
+        Overlay::SpaceHome => draw_space_home_overlay(f, app),
         Overlay::FileConfirm => draw_file_confirm_overlay(f, app),
         Overlay::None => {}
     }
@@ -265,62 +266,101 @@ fn draw_rooms_panel(f: &mut Frame, app: &App, area: Rect) {
         && app.favorites_count < app.all_rooms.len();
 
     let mut items: Vec<ListItem> = Vec::new();
-    // Track mapping from visual index -> all_rooms index
-    // The separator is visual-only and not in all_rooms
     let mut visual_to_room: Vec<Option<usize>> = Vec::new();
 
-    for (i, room) in app.all_rooms.iter().enumerate() {
-        // Insert separator between favorites and others
-        if has_separator && i == app.favorites_count {
-            let sep_width = (area.width as usize).saturating_sub(2);
-            items.push(
-                ListItem::new(format!(" {}", "\u{2500}".repeat(sep_width.saturating_sub(1))))
-                    .style(Style::default().fg(theme.dimmed)),
-            );
-            visual_to_room.push(None);
-        }
+    let max_name = (area.width as usize).saturating_sub(6);
 
-        let is_fav = i < app.favorites_count;
-        let prefix = if is_fav {
-            "\u{2605}"
-        } else if room.is_dm {
-            "@"
-        } else {
-            "#"
-        };
-        let unread = if room.unread > 0 {
-            format!(" ({})", room.unread)
-        } else {
-            String::new()
-        };
-
+    // Helper: build style for a room entry
+    let room_style = |i: usize, room: &crate::account::RoomInfo| -> Style {
         let is_active = Some(&room.id) == app.active_room.as_ref();
         let is_selected = i == app.selected_room;
-
-        let style = if is_active {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
+        if is_active {
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
         } else if is_selected && focused {
             Style::default().fg(theme.text).bg(theme.highlight_bg)
         } else if room.unread > 0 {
-            Style::default()
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text_dim)
-        };
+        }
+    };
 
-        // Truncate name to fit
-        let max_name = (area.width as usize).saturating_sub(6);
-        let name = if room.name.len() > max_name {
-            format!("{}…", &room.name[..max_name.saturating_sub(1)])
+    let truncate = |name: &str, max: usize| -> String {
+        if name.chars().count() > max {
+            format!("{}…", name.chars().take(max.saturating_sub(1)).collect::<String>())
         } else {
-            room.name.clone()
-        };
+            name.to_string()
+        }
+    };
 
-        items.push(ListItem::new(format!(" {}{}{}", prefix, name, unread)).style(style));
+    // --- Favorites ---
+    for i in 0..app.favorites_count {
+        if let Some(room) = app.all_rooms.get(i) {
+            let lock = if room.encrypted { "\u{1F512}" } else { "" };
+            let unread = if room.unread > 0 { format!(" ({})", room.unread) } else { String::new() };
+            let name = truncate(&room.name, max_name);
+            items.push(ListItem::new(format!(" {}\u{2605}{}{}", lock, name, unread)).style(room_style(i, room)));
+            visual_to_room.push(Some(i));
+        }
+    }
+
+    // --- Separator ---
+    if has_separator {
+        let sep_width = (area.width as usize).saturating_sub(2);
+        items.push(
+            ListItem::new(format!(" {}", "\u{2500}".repeat(sep_width.saturating_sub(1))))
+                .style(Style::default().fg(theme.dimmed)),
+        );
+        visual_to_room.push(None);
+    }
+
+    // --- Ungrouped rooms (not favorites, not spaces, no parent space) ---
+    for (i, room) in app.all_rooms.iter().enumerate() {
+        if i < app.favorites_count || room.is_space || room.parent_space_id.is_some() {
+            continue;
+        }
+        let lock = if room.encrypted { "\u{1F512}" } else { "" };
+        let prefix = if room.is_dm { "@" } else { "#" };
+        let unread = if room.unread > 0 { format!(" ({})", room.unread) } else { String::new() };
+        let name = truncate(&room.name, max_name);
+        items.push(ListItem::new(format!(" {}{}{}{}", lock, prefix, name, unread)).style(room_style(i, room)));
         visual_to_room.push(Some(i));
+    }
+
+    // --- Spaces with children ---
+    let space_indices: Vec<usize> = app.all_rooms.iter().enumerate()
+        .filter(|(i, r)| r.is_space && *i >= app.favorites_count)
+        .map(|(i, _)| i)
+        .collect();
+
+    for si in &space_indices {
+        let space = &app.all_rooms[*si];
+        let collapsed = app.collapsed_spaces.contains(&space.id);
+        let arrow = if collapsed { "\u{25B8}" } else { "\u{25BE}" }; // ▸ or ▾
+        let space_name = truncate(&space.name, max_name.saturating_sub(2));
+        // Space header — underlined, selectable for collapse toggle
+        let space_style = if *si == app.selected_room && focused {
+            Style::default().fg(theme.text).bg(theme.highlight_bg).add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(theme.text).add_modifier(Modifier::UNDERLINED)
+        };
+        items.push(ListItem::new(format!(" {} {}", arrow, space_name)).style(space_style));
+        visual_to_room.push(Some(*si)); // selectable — Enter toggles collapse
+
+        // Child rooms of this space (skip if collapsed)
+        if !collapsed {
+            for (i, room) in app.all_rooms.iter().enumerate() {
+                if i < app.favorites_count || room.parent_space_id.as_ref() != Some(&space.id) {
+                    continue;
+                }
+                let lock = if room.encrypted { "\u{1F512}" } else { "" };
+                let prefix = if room.is_dm { "@" } else { "#" };
+                let unread = if room.unread > 0 { format!(" ({})", room.unread) } else { String::new() };
+                let name = truncate(&room.name, max_name.saturating_sub(2));
+                items.push(ListItem::new(format!("  -{}{}{}{}", lock, prefix, name, unread)).style(room_style(i, room)));
+                visual_to_room.push(Some(i));
+            }
+        }
     }
 
     let list = List::new(items).block(block);
@@ -457,6 +497,22 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().fg(theme.dimmed))
             .block(msg_block);
         f.render_widget(welcome, msg_area);
+    } else if app.messages.is_empty() && app.active_room.is_some() {
+        let spinners = ['\u{28FB}','\u{28FD}','\u{28FE}','\u{28F7}','\u{28EF}','\u{28DF}','\u{28BF}','\u{287F}'];
+        let frame = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() / 120) as usize % spinners.len();
+        let spin = spinners[frame];
+        let loading_text = if app.downloading_keys {
+            format!("\n\n  {} Downloading room keys...", spin)
+        } else {
+            format!("\n\n  {} Loading messages...", spin)
+        };
+        let loading = Paragraph::new(loading_text)
+            .style(Style::default().fg(theme.status_warn))
+            .block(msg_block);
+        f.render_widget(loading, msg_area);
     } else {
         let msg_height = msg_area.height.saturating_sub(2) as usize;
         let inner_width = msg_area.width.saturating_sub(2) as usize; // borders
@@ -467,23 +523,19 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             app.messages.len()
         };
 
-        // Measure messages from the bottom up to find how many actually fit,
-        // accounting for line wrapping with consistent indent
-        let mut used_height = 0usize;
-        let mut start = end;
-        for i in (0..end).rev() {
+        // Calculate height of each message (including separator)
+        let msg_visual_height = |i: usize, is_last: bool| -> usize {
             let msg = &app.messages[i];
             let is_reply = msg.reply_to_sender.is_some();
             let indent = if is_reply { "    " } else { "  " };
             let indent_w = indent.chars().count();
-            let mut msg_h = wrapped_height_indented(msg.sender.chars().count(), indent_w, inner_width);
+            // Presence dot adds characters to sender but doesn't change line count
+            let sender_extra = if app.user_presence.get(&msg.sender).map(|s| s.as_str()) == Some("online")
+                || app.user_presence.get(&msg.sender).map(|s| s.as_str()) == Some("unavailable") { 2 } else { 0 };
+            let mut h = wrapped_height_indented(msg.sender.chars().count() + sender_extra, indent_w, inner_width);
             match &msg.content {
                 MessageContent::Image { protocol, .. } => {
-                    if protocol.is_some() {
-                        msg_h += 8; // image display height
-                    } else {
-                        msg_h += 1; // loading/fallback text
-                    }
+                    h += if protocol.is_some() { 8 } else { 1 };
                 }
                 MessageContent::File { body, media_type, .. } => {
                     let prefix = match media_type {
@@ -492,36 +544,51 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
                         FileKind::Audio => "[audio: ",
                     };
                     let content = format!("{}{}]", prefix, body);
-                    msg_h += wrapped_height_indented(content.chars().count(), indent_w, inner_width);
+                    h += wrapped_height_indented(content.chars().count(), indent_w, inner_width);
                 }
                 MessageContent::Text(_) => {
                     let body_str = msg.body_text();
-                    msg_h += wrapped_height_indented(body_str.chars().count(), indent_w, inner_width);
+                    h += wrapped_height_indented(body_str.chars().count(), indent_w, inner_width);
                 }
             }
-            // Reply context line (may wrap)
             if is_reply {
                 let reply_content = format!("\u{2514} {}: {}",
                     msg.reply_to_sender.as_deref().unwrap_or(""),
                     msg.reply_to_body.as_deref().unwrap_or(""));
-                msg_h += wrapped_height_indented(reply_content.chars().count(), 2, inner_width);
+                h += wrapped_height_indented(reply_content.chars().count(), 2, inner_width);
             }
-            // Reaction line
-            if !msg.reactions.is_empty() {
-                msg_h += 1;
-            }
-            // Unread separator
-            if app.first_unread_index == Some(i) {
-                msg_h += 1;
-            }
-            // Separator line between messages (not after the last one)
-            if i + 1 < end {
-                msg_h += 1;
-            }
-            if used_height + msg_h > msg_height {
+            if !msg.reactions.is_empty() { h += 1; }
+            if app.first_unread_index == Some(i) { h += 1; }
+            if !is_last { h += 1; } // separator between messages
+            h
+        };
+
+        // Calculate overflow for the selected message (used by key handler)
+        let selected_overflow = if let Some(sel_idx) = app.selected_message {
+            if sel_idx < end {
+                let sel_h = msg_visual_height(sel_idx, sel_idx + 1 == end);
+                sel_h.saturating_sub(msg_height)
+            } else { 0 }
+        } else { 0 };
+        app.selected_msg_overflow.set(selected_overflow);
+
+        // Measure from bottom up — allow partial top message
+        // When msg_scroll > 0, we need additional lines from above
+        let effective_height = msg_height + app.msg_scroll;
+        let mut used_height = 0usize;
+        let mut start = end;
+        let mut clip_top_lines: usize = 0;
+        for i in (0..end).rev() {
+            let h = msg_visual_height(i, i + 1 == end);
+            if used_height + h > effective_height {
+                let remaining = effective_height.saturating_sub(used_height);
+                if remaining > 0 {
+                    clip_top_lines = h - remaining;
+                    start = i;
+                }
                 break;
             }
-            used_height += msg_h;
+            used_height += h;
             start = i;
         }
         let msgs_per_page = end - start;
@@ -581,7 +648,14 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             }
 
             let indent = if is_reply { "    " } else { "  " };
-            visible.extend(wrap_with_indent(&msg.sender, indent, inner_width, sender_style));
+            // Presence dot before sender name
+            let presence = app.user_presence.get(&msg.sender);
+            let sender_with_presence = match presence.map(|s| s.as_str()) {
+                Some("online") => format!("\u{25CF} {}", msg.sender),
+                Some("unavailable") => format!("\u{25CB} {}", msg.sender),
+                _ => msg.sender.clone(),
+            };
+            visible.extend(wrap_with_indent(&sender_with_presence, indent, inner_width, sender_style));
 
             match &msg.content {
                 MessageContent::Image { body, loading, protocol, source, .. } => {
@@ -651,15 +725,48 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             }
         }
 
+        // Clip top lines of the topmost partially-visible message
+        if clip_top_lines > 0 && visible.len() > clip_top_lines {
+            visible = visible.split_off(clip_top_lines);
+        }
+
+        // Show loading spinner at top when fetching older messages
+        if app.loading_older && start == 0 {
+            let spinners = ['\u{28FB}','\u{28FD}','\u{28FE}','\u{28F7}','\u{28EF}','\u{28DF}','\u{28BF}','\u{287F}'];
+            let frame = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() / 120) as usize % spinners.len();
+            let spin = spinners[frame];
+            let loading_line = Line::from(Span::styled(
+                format!("  {} Loading older messages...", spin),
+                Style::default().fg(theme.status_warn),
+            ));
+            visible.insert(0, loading_line);
+            // Remove last line to keep within msg_height
+            if visible.len() > msg_height {
+                visible.truncate(msg_height);
+            }
+        }
+
+        // When msg_scroll > 0, truncate from the bottom (keep top msg_height lines)
+        if app.msg_scroll > 0 && visible.len() > msg_height {
+            visible.truncate(msg_height);
+        }
+
         // Bottom-align: pad top with empty lines so messages anchor to the bottom
-        let top_padding = if used_height < msg_height {
-            let padding = msg_height - used_height;
+        let top_padding = if visible.len() < msg_height {
+            let padding = msg_height - visible.len();
             let mut padded = vec![Line::from(""); padding];
             let pad_count = padded.len();
             padded.append(&mut visible);
             visible = padded;
             pad_count
         } else {
+            // Truncate if we somehow have too many lines
+            if visible.len() > msg_height {
+                visible = visible.split_off(visible.len() - msg_height);
+            }
             0
         };
 
@@ -676,7 +783,13 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
         for (line_offset, msg_idx) in &image_positions {
             if let Some(msg) = app.messages.get(*msg_idx) {
                 if let MessageContent::Image { protocol: Some(ref proto), .. } = msg.content {
-                    let y_offset = (*line_offset + top_padding) as u16;
+                    // Adjust for clipped top lines
+                    let adjusted = if *line_offset >= clip_top_lines {
+                        *line_offset - clip_top_lines
+                    } else {
+                        continue; // image is clipped off
+                    };
+                    let y_offset = (adjusted + top_padding) as u16;
                     if y_offset < inner_area.height {
                         let img_height = 8u16.min(inner_area.height.saturating_sub(y_offset));
                         let img_area = Rect::new(
@@ -701,8 +814,10 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or("");
 
         for (line_offset, source, text_len) in &link_positions {
+            if *line_offset < clip_top_lines { continue; }
+            let adjusted_offset = *line_offset - clip_top_lines;
             if let Some(url) = media_download_url(source, homeserver) {
-                let y = inner_area.y + (*line_offset + top_padding) as u16;
+                let y = inner_area.y + (adjusted_offset + top_padding) as u16;
                 if y < inner_area.bottom() {
                     inject_osc8_link(
                         f.buffer_mut(),
@@ -809,7 +924,7 @@ fn draw_login_overlay(f: &mut Frame, app: &App) {
     let un_lines = input_field_lines(&app.login_username, inner_w);
     let masked: String = "\u{25cf}".repeat(app.login_password.len());
     let pw_lines = input_field_lines(&masked, inner_w);
-    let height = (8 + hs_lines + un_lines + pw_lines).min(f.area().height);
+    let height = (10 + hs_lines + un_lines + pw_lines).min(f.area().height);
 
     let area = centered_rect(50, height, f.area());
     f.render_widget(Clear, area);
@@ -887,19 +1002,22 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         "    Tab/Shift+Tab    Cycle panels",
         "    Arrow keys       Navigate within panel",
         "    Enter            Select room / send message",
-        "    Esc              Back / deselect",
+        "    Esc              Back / close overlay",
         "",
         "  Global:",
         "    Ctrl+K           Quick room switcher",
+        "    Ctrl+U           Upload / attach file",
         "    Ctrl+Q           Quit",
         "    a                Add account",
         "    s                Settings / themes",
         "    n                New room",
         "    e                Edit active room",
-        "    ?                Toggle this help",
+        "    ? / h            Toggle this help",
         "",
         "  Rooms:",
+        "    Enter            Open room / space home",
         "    f                Toggle favorite",
+        "    Space            Collapse / expand space",
         "    Shift+Up/Down    Reorder favorites",
         "",
         "  Chat:",
@@ -907,16 +1025,25 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         "    Enter            Message actions (edit/delete)",
         "    r                Reply to selected message",
         "    e                React to selected message",
-        "    Ctrl+I           Room info panel",
+        "    i                Room info (members, topic)",
+        "    Ctrl+U           Upload / attach file",
         "    Tab              Focus input box",
         "    Esc              Deselect / back to rooms",
         "    Home/End         Jump to oldest / newest",
+        "",
+        "  Input:",
+        "    Enter            Send message",
+        "    Esc              Cancel / back to chat",
+        "    Tab              Back to rooms",
+        "    Paste            Supported in all fields",
     ];
 
     let content_height = help_text.len() as u16;
     let height = (content_height + 2).min(term.height); // +2 for borders
+    let max_line = help_text.iter().map(|l| l.len()).max().unwrap_or(40) as u16 + 4; // +4 for borders+padding
+    let width_pct = ((max_line * 100 / term.width.max(1)) + 1).min(95).max(60);
 
-    let area = centered_rect(60, height, term);
+    let area = centered_rect(width_pct, height, term);
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1005,7 +1132,7 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     let theme = &app.theme;
 
     // Dynamic height based on expanded sub-menus
-    let mut content_lines: u16 = 7; // top_pad + Accounts + Theme + Sort + Clear Cache + bottom_pad + hint
+    let mut content_lines: u16 = 8; // top_pad + Accounts + Theme + Sort + Clear Cache + Reset All + bottom_pad + hint
     if app.settings_accounts_open {
         content_lines += 1 + app.accounts.len() as u16; // Add Account + each account
         if app.settings_account_action_open {
@@ -1280,6 +1407,24 @@ fn draw_settings_overlay(f: &mut Frame, app: &App) {
     lines.push(Line::from(Span::styled(
         format!("{}Clear Cache", prefix3),
         style3,
+    )));
+
+    // --- Reset All item ---
+    let sel4 = at_top && app.settings_selected == 4;
+    let (prefix4, style4) = if sel4 {
+        (
+            "  > ",
+            Style::default()
+                .fg(theme.status_err)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("    ", Style::default().fg(theme.status_err))
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{}Reset All (logout + wipe)", prefix4),
+        style4,
     )));
 
     // Bottom padding
@@ -2324,7 +2469,8 @@ fn draw_room_info_overlay(f: &mut Frame, app: &App) {
     } else {
         0
     };
-    let height = (9 + topic_lines).min(term.height);
+    let member_lines = details.members.len().min(12) as u16;
+    let height = (12 + topic_lines + member_lines).min(term.height);
     let area = centered_rect(60, height, term);
 
     f.render_widget(ratatui::widgets::Clear, area);
@@ -2361,13 +2507,132 @@ fn draw_room_info_overlay(f: &mut Frame, app: &App) {
     }
 
     lines.push(Line::from(Span::styled(
-        format!("  Members: {}", details.member_count),
-        Style::default().fg(theme.text),
-    )));
-    lines.push(Line::from(Span::styled(
         format!("  Encryption: {}", details.encryption),
         Style::default().fg(theme.text),
     )));
+    lines.push(Line::from(""));
+
+    // Member list with presence indicators
+    lines.push(Line::from(Span::styled(
+        format!("  Members ({})", details.member_count),
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+    )));
+
+    let visible_members = if details.members.len() > 12 { 12 } else { details.members.len() };
+    for member in details.members.iter().take(visible_members) {
+        let presence = app.user_presence.get(&member.user_id);
+        let (dot, dot_color) = match presence.map(|s| s.as_str()) {
+            Some("online") => ("\u{25CF} ", theme.status_ok),
+            Some("unavailable") => ("\u{25CF} ", theme.status_warn),
+            _ => ("\u{25CB} ", theme.dimmed),
+        };
+        let display = if member.display_name != member.user_id {
+            format!("  {} {}", member.display_name, member.user_id)
+        } else {
+            format!("  {}", member.user_id)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(dot, Style::default().fg(dot_color)),
+            Span::styled(display, Style::default().fg(theme.text_dim)),
+        ]));
+    }
+    if details.members.len() > 12 {
+        lines.push(Line::from(Span::styled(
+            format!("    … and {} more", details.members.len() - 12),
+            Style::default().fg(theme.dimmed),
+        )));
+    }
+
+    let content = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(content, inner);
+}
+
+fn draw_space_home_overlay(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let details = match &app.space_details {
+        Some(d) => d,
+        None => return,
+    };
+
+    let term = f.area();
+    let topic_lines: u16 = if let Some(ref topic) = details.topic {
+        let inner_w = (term.width as usize * 70 / 100).saturating_sub(4);
+        if inner_w == 0 { 1 } else { ((topic.len().max(1) + inner_w - 1) / inner_w) as u16 }
+    } else {
+        0
+    };
+    let room_lines = details.rooms.len().min(15) as u16;
+    let height = (10 + topic_lines + room_lines).min(term.height);
+    let area = centered_rect(70, height, term);
+
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .title(Span::styled(
+            " Space Home ",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", details.name),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )),
+        Line::from(Span::styled(
+            format!("  {}", details.room_id),
+            Style::default().fg(theme.text_dim),
+        )),
+        Line::from(""),
+    ];
+
+    if let Some(ref topic) = details.topic {
+        lines.push(Line::from(Span::styled(
+            format!("  Topic: {}", topic),
+            Style::default().fg(theme.text),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("  Members: {}", details.member_count),
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(""));
+
+    // Child rooms and spaces
+    if details.rooms.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No rooms in this space",
+            Style::default().fg(theme.dimmed),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("  Rooms ({})", details.rooms.len()),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )));
+        let visible = details.rooms.len().min(15);
+        for child in details.rooms.iter().take(visible) {
+            let lock = if child.encrypted { "\u{1F512}" } else { "" };
+            let icon = if child.is_space { "\u{25B8} " } else { "" };
+            let prefix = if child.is_space { "" } else { "#" };
+            lines.push(Line::from(Span::styled(
+                format!("    {}{}{}{} ({} members)", icon, lock, prefix, child.name, child.member_count),
+                Style::default().fg(theme.text_dim),
+            )));
+        }
+        if details.rooms.len() > 15 {
+            lines.push(Line::from(Span::styled(
+                format!("    \u{2026} and {} more", details.rooms.len() - 15),
+                Style::default().fg(theme.dimmed),
+            )));
+        }
+    }
 
     let content = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(content, inner);

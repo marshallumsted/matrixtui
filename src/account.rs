@@ -25,6 +25,7 @@ use matrix_sdk::{
             },
             room::MediaSource,
             typing::TypingEventContent,
+                presence::PresenceEvent,
         },
     },
 };
@@ -84,6 +85,10 @@ pub enum MatrixEvent {
         event_id: String,
         key: String,
     },
+    Presence {
+        user_id: String,
+        presence: String,
+    },
     RoomsUpdated,
     SyncError {
         account_id: String,
@@ -135,6 +140,14 @@ pub enum MatrixEvent {
         media_type: crate::app::FileKind,
         reply_to_event_id: Option<String>,
     },
+    OlderMessagesLoaded {
+        room_id: OwnedRoomId,
+        messages: Vec<crate::app::DisplayMessage>,
+        next_token: Option<String>,
+    },
+    OlderMessagesFailed {
+        error: String,
+    },
 }
 
 /// Room info for display
@@ -143,8 +156,18 @@ pub struct RoomInfo {
     pub id: OwnedRoomId,
     pub name: String,
     pub is_dm: bool,
+    pub encrypted: bool,
+    pub is_space: bool,
+    pub parent_space_id: Option<OwnedRoomId>,
     pub unread: u64,
     pub account_id: String,
+}
+
+/// A room member for display
+#[derive(Debug, Clone)]
+pub struct MemberInfo {
+    pub user_id: String,
+    pub display_name: String,
 }
 
 /// Detailed room info for the Room Info overlay
@@ -155,6 +178,26 @@ pub struct RoomDetails {
     pub member_count: u64,
     pub encryption: String,
     pub room_id: String,
+    pub members: Vec<MemberInfo>,
+}
+
+/// Space details for the Space Home overlay
+#[derive(Debug, Clone)]
+pub struct SpaceDetails {
+    pub name: String,
+    pub topic: Option<String>,
+    pub member_count: u64,
+    pub room_id: String,
+    pub rooms: Vec<SpaceChildInfo>,
+}
+
+/// A child room/space within a space
+#[derive(Debug, Clone)]
+pub struct SpaceChildInfo {
+    pub name: String,
+    pub is_space: bool,
+    pub encrypted: bool,
+    pub member_count: u64,
 }
 
 /// A single logged-in Matrix account
@@ -381,6 +424,20 @@ impl Account {
                 },
             );
 
+            // Register presence handler
+            let tx_presence = tx.clone();
+            client.add_event_handler(
+                move |event: PresenceEvent| {
+                    let tx = tx_presence.clone();
+                    async move {
+                        let _ = tx.send(MatrixEvent::Presence {
+                            user_id: event.sender.to_string(),
+                            presence: format!("{}", event.content.presence),
+                        });
+                    }
+                },
+            );
+
             // Register reaction handler
             let tx_react = tx.clone();
             client.add_event_handler(
@@ -446,22 +503,166 @@ impl Account {
 
     /// Get joined rooms as RoomInfo
     pub async fn rooms(&self) -> Vec<RoomInfo> {
+        use futures_util::StreamExt;
+
+        let joined = self.client.joined_rooms();
+
+        // Collect space room IDs first
+        let space_ids: Vec<OwnedRoomId> = joined
+            .iter()
+            .filter(|r| r.is_space())
+            .map(|r| r.room_id().to_owned())
+            .collect();
+
         let mut result = Vec::new();
-        for room in self.client.joined_rooms() {
+        for room in &joined {
             let name = room
                 .cached_display_name()
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| room.room_id().to_string());
             let is_dm = room.is_direct().await.unwrap_or(false);
+            let encrypted = room.encryption_state().is_encrypted();
+            let is_space = room.is_space();
+
+            // Check if this room belongs to a parent space we've joined
+            let parent_space_id = if !is_space {
+                match room.parent_spaces().await {
+                    Ok(stream) => {
+                        let parents: Vec<_> = stream
+                            .filter_map(|r| async { r.ok() })
+                            .collect()
+                            .await;
+                        parents.iter().find_map(|p| {
+                            let pid = match p {
+                                matrix_sdk::room::ParentSpace::Reciprocal(r)
+                                | matrix_sdk::room::ParentSpace::WithPowerlevel(r)
+                                | matrix_sdk::room::ParentSpace::Illegitimate(r) => r.room_id().to_owned(),
+                                matrix_sdk::room::ParentSpace::Unverifiable(id) => id.clone(),
+                            };
+                            if space_ids.contains(&pid) { Some(pid) } else { None }
+                        })
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
             result.push(RoomInfo {
                 id: room.room_id().to_owned(),
                 name,
                 is_dm,
+                encrypted,
+                is_space,
+                parent_space_id,
                 unread: room.num_unread_notifications().into(),
                 account_id: self.user_id.clone(),
             });
         }
         result
+    }
+
+    /// Parse a single timeline event into a DisplayMessage (if it's a supported message type)
+    pub fn timeline_event_to_display_message(
+        ev: &AnySyncTimelineEvent,
+    ) -> Option<crate::app::DisplayMessage> {
+        match ev {
+            AnySyncTimelineEvent::MessageLike(
+                AnySyncMessageLikeEvent::RoomMessage(SyncRoomMessageEvent::Original(original)),
+            ) => {
+                let reply_to_event_id = match &original.content.relates_to {
+                    Some(Relation::Reply { in_reply_to }) => {
+                        Some(in_reply_to.event_id.to_string())
+                    }
+                    _ => None,
+                };
+                if let MessageType::Image(ref img) = original.content.msgtype {
+                    Some(crate::app::DisplayMessage {
+                        sender: original.sender.to_string(),
+                        content: crate::app::MessageContent::Image {
+                            body: img.filename().to_string(),
+                            source: img.source.clone(),
+                            protocol: None,
+                            loading: false,
+                        },
+                        timestamp: original.origin_server_ts.as_secs().into(),
+                        event_id: Some(original.event_id.to_string()),
+                        reply_to_sender: None,
+                        reply_to_body: None,
+                        reactions: Vec::new(),
+                        reply_to_event_id_raw: reply_to_event_id,
+                    })
+                } else if let MessageType::File(ref f) = original.content.msgtype {
+                    Some(crate::app::DisplayMessage {
+                        sender: original.sender.to_string(),
+                        content: crate::app::MessageContent::File {
+                            body: f.filename().to_string(),
+                            source: f.source.clone(),
+                            media_type: crate::app::FileKind::File,
+                        },
+                        timestamp: original.origin_server_ts.as_secs().into(),
+                        event_id: Some(original.event_id.to_string()),
+                        reply_to_sender: None,
+                        reply_to_body: None,
+                        reactions: Vec::new(),
+                        reply_to_event_id_raw: reply_to_event_id,
+                    })
+                } else if let MessageType::Video(ref v) = original.content.msgtype {
+                    Some(crate::app::DisplayMessage {
+                        sender: original.sender.to_string(),
+                        content: crate::app::MessageContent::File {
+                            body: v.filename().to_string(),
+                            source: v.source.clone(),
+                            media_type: crate::app::FileKind::Video,
+                        },
+                        timestamp: original.origin_server_ts.as_secs().into(),
+                        event_id: Some(original.event_id.to_string()),
+                        reply_to_sender: None,
+                        reply_to_body: None,
+                        reactions: Vec::new(),
+                        reply_to_event_id_raw: reply_to_event_id,
+                    })
+                } else if let MessageType::Audio(ref a) = original.content.msgtype {
+                    Some(crate::app::DisplayMessage {
+                        sender: original.sender.to_string(),
+                        content: crate::app::MessageContent::File {
+                            body: a.filename().to_string(),
+                            source: a.source.clone(),
+                            media_type: crate::app::FileKind::Audio,
+                        },
+                        timestamp: original.origin_server_ts.as_secs().into(),
+                        event_id: Some(original.event_id.to_string()),
+                        reply_to_sender: None,
+                        reply_to_body: None,
+                        reactions: Vec::new(),
+                        reply_to_event_id_raw: reply_to_event_id,
+                    })
+                } else {
+                    let body = match &original.content.msgtype {
+                        MessageType::Text(text) => text.body.clone(),
+                        MessageType::Notice(n) => n.body.clone(),
+                        MessageType::Emote(e) => format!("* {}", e.body),
+                        _ => "[unsupported message type]".to_string(),
+                    };
+                    let body = if reply_to_event_id.is_some() {
+                        strip_reply_fallback(&body)
+                    } else {
+                        body
+                    };
+                    Some(crate::app::DisplayMessage {
+                        sender: original.sender.to_string(),
+                        content: crate::app::MessageContent::Text(body),
+                        timestamp: original.origin_server_ts.as_secs().into(),
+                        event_id: Some(original.event_id.to_string()),
+                        reply_to_sender: None,
+                        reply_to_body: None,
+                        reactions: Vec::new(),
+                        reply_to_event_id_raw: reply_to_event_id,
+                    })
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Fetch message history with pagination support
@@ -487,8 +688,15 @@ impl Account {
                 room_id,
                 prev_batch.as_deref().unwrap_or("None")
             );
-            if prev_batch.is_some() {
-                options = options.from(prev_batch.as_deref());
+            match prev_batch {
+                Some(ref token) => {
+                    options = options.from(Some(token.as_str()));
+                }
+                None => {
+                    // No pagination token yet — sync may still be running
+                    info!("No prev_batch for {} — returning empty", room_id);
+                    return Ok((Vec::new(), None));
+                }
             }
         }
 
@@ -502,105 +710,12 @@ impl Account {
 
         for timeline_event in &response.chunk {
             match timeline_event.raw().deserialize() {
-                Ok(AnySyncTimelineEvent::MessageLike(
-                    AnySyncMessageLikeEvent::RoomMessage(SyncRoomMessageEvent::Original(original)),
-                )) => {
-                    let reply_to_event_id = match &original.content.relates_to {
-                        Some(Relation::Reply { in_reply_to }) => {
-                            Some(in_reply_to.event_id.to_string())
-                        }
-                        _ => None,
-                    };
-                    // Handle image messages with full metadata
-                    if let MessageType::Image(ref img) = original.content.msgtype {
-                        messages.push(crate::app::DisplayMessage {
-                            sender: original.sender.to_string(),
-                            content: crate::app::MessageContent::Image {
-                                body: img.filename().to_string(),
-                                source: img.source.clone(),
-                                protocol: None,
-                                loading: false,
-                            },
-                            timestamp: original.origin_server_ts.as_secs().into(),
-                            event_id: Some(original.event_id.to_string()),
-                            reply_to_sender: None,
-                            reply_to_body: None,
-                            reactions: Vec::new(),
-                            reply_to_event_id_raw: reply_to_event_id,
-                        });
-                    } else if let MessageType::File(ref f) = original.content.msgtype {
-                        messages.push(crate::app::DisplayMessage {
-                            sender: original.sender.to_string(),
-                            content: crate::app::MessageContent::File {
-                                body: f.filename().to_string(),
-                                source: f.source.clone(),
-                                media_type: crate::app::FileKind::File,
-                            },
-                            timestamp: original.origin_server_ts.as_secs().into(),
-                            event_id: Some(original.event_id.to_string()),
-                            reply_to_sender: None,
-                            reply_to_body: None,
-                            reactions: Vec::new(),
-                            reply_to_event_id_raw: reply_to_event_id,
-                        });
-                    } else if let MessageType::Video(ref v) = original.content.msgtype {
-                        messages.push(crate::app::DisplayMessage {
-                            sender: original.sender.to_string(),
-                            content: crate::app::MessageContent::File {
-                                body: v.filename().to_string(),
-                                source: v.source.clone(),
-                                media_type: crate::app::FileKind::Video,
-                            },
-                            timestamp: original.origin_server_ts.as_secs().into(),
-                            event_id: Some(original.event_id.to_string()),
-                            reply_to_sender: None,
-                            reply_to_body: None,
-                            reactions: Vec::new(),
-                            reply_to_event_id_raw: reply_to_event_id,
-                        });
-                    } else if let MessageType::Audio(ref a) = original.content.msgtype {
-                        messages.push(crate::app::DisplayMessage {
-                            sender: original.sender.to_string(),
-                            content: crate::app::MessageContent::File {
-                                body: a.filename().to_string(),
-                                source: a.source.clone(),
-                                media_type: crate::app::FileKind::Audio,
-                            },
-                            timestamp: original.origin_server_ts.as_secs().into(),
-                            event_id: Some(original.event_id.to_string()),
-                            reply_to_sender: None,
-                            reply_to_body: None,
-                            reactions: Vec::new(),
-                            reply_to_event_id_raw: reply_to_event_id,
-                        });
-                    } else {
-                        let body = match &original.content.msgtype {
-                            MessageType::Text(text) => text.body.clone(),
-                            MessageType::Notice(n) => n.body.clone(),
-                            MessageType::Emote(e) => format!("* {}", e.body),
-                            _ => "[unsupported message type]".to_string(),
-                        };
-                        // Strip reply fallback from body if this is a reply
-                        let body = if reply_to_event_id.is_some() {
-                            strip_reply_fallback(&body)
-                        } else {
-                            body
-                        };
-                        messages.push(crate::app::DisplayMessage {
-                            sender: original.sender.to_string(),
-                            content: crate::app::MessageContent::Text(body),
-                            timestamp: original.origin_server_ts.as_secs().into(),
-                            event_id: Some(original.event_id.to_string()),
-                            reply_to_sender: None,
-                            reply_to_body: None,
-                            reactions: Vec::new(),
-                            reply_to_event_id_raw: reply_to_event_id,
-                        });
+                Ok(ev) => {
+                    if let Some(dm) = Self::timeline_event_to_display_message(&ev) {
+                        messages.push(dm);
                     }
                 }
-                Ok(_) => {} // state events, reactions, etc — skip
                 Err(e) => {
-                    // Likely an encrypted message that couldn't be decrypted
                     info!("Failed to deserialize event: {}", e);
                     messages.push(crate::app::DisplayMessage {
                         sender: "".to_string(),
@@ -923,8 +1038,8 @@ impl Account {
     }
 
 
-    /// Get detailed room info
-    pub fn get_room_details(&self, room_id: &OwnedRoomId) -> Option<RoomDetails> {
+    /// Get detailed room info including member list
+    pub async fn get_room_details(&self, room_id: &OwnedRoomId) -> Option<RoomDetails> {
         let room = self.client.get_room(room_id)?;
         let name = room
             .cached_display_name()
@@ -937,13 +1052,92 @@ impl Account {
         } else {
             "Not encrypted".to_string()
         };
+
+        // Fetch member list
+        let members = match room.members(matrix_sdk::RoomMemberships::JOIN).await {
+            Ok(member_list) => member_list
+                .into_iter()
+                .map(|m| MemberInfo {
+                    user_id: m.user_id().to_string(),
+                    display_name: m.name().to_string(),
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
         Some(RoomDetails {
             name,
             topic,
             member_count,
             encryption,
             room_id: room.room_id().to_string(),
+            members,
         })
+    }
+
+    /// Get space details including child rooms
+    pub async fn get_space_details(&self, room_id: &OwnedRoomId) -> Option<SpaceDetails> {
+        let room = self.client.get_room(room_id)?;
+        let name = room
+            .cached_display_name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| room.room_id().to_string());
+        let topic = room.topic();
+        let member_count = room.joined_members_count();
+
+        // Find child rooms that belong to this space
+        let mut children = Vec::new();
+        for child_room in self.client.joined_rooms() {
+            if child_room.room_id() == room_id {
+                continue; // skip self
+            }
+            // Check if this room has this space as parent
+            if let Ok(stream) = child_room.parent_spaces().await {
+                use futures_util::StreamExt;
+                let parents: Vec<_> = stream
+                    .filter_map(|r| async { r.ok() })
+                    .collect()
+                    .await;
+                let is_child = parents.iter().any(|p| {
+                    let pid = match p {
+                        matrix_sdk::room::ParentSpace::Reciprocal(r)
+                        | matrix_sdk::room::ParentSpace::WithPowerlevel(r)
+                        | matrix_sdk::room::ParentSpace::Illegitimate(r) => r.room_id().to_owned(),
+                        matrix_sdk::room::ParentSpace::Unverifiable(id) => id.clone(),
+                    };
+                    &pid == room_id
+                });
+                if is_child {
+                    let child_name = child_room
+                        .cached_display_name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| child_room.room_id().to_string());
+                    children.push(SpaceChildInfo {
+                        name: child_name,
+                        is_space: child_room.is_space(),
+                        encrypted: child_room.encryption_state().is_encrypted(),
+                        member_count: child_room.joined_members_count(),
+                    });
+                }
+            }
+        }
+
+        Some(SpaceDetails {
+            name,
+            topic,
+            member_count,
+            room_id: room.room_id().to_string(),
+            rooms: children,
+        })
+    }
+
+    /// Check if this session's cross-signing is verified
+    pub async fn is_session_verified(&self) -> bool {
+        let status = self.client.encryption().cross_signing_status().await;
+        match status {
+            Some(s) => s.is_complete(),
+            None => false,
+        }
     }
 
     /// Recover E2EE secrets using a recovery key (or passphrase)
@@ -1000,12 +1194,56 @@ impl Account {
             .ok_or_else(|| anyhow::anyhow!("Verification request not found"))?;
 
         request.accept().await?;
+        info!("Accepted verification request, checking state...");
 
-        // Wait for the request to become ready, then start SAS
+        // Check if already ready (accept() may transition immediately)
+        let current = request.state();
+        info!("Verification request state after accept: {:?}", &current);
+        let already_ready = matches!(current, VerificationRequestState::Ready { .. });
+
+        if already_ready {
+            info!("Request already ready after accept, starting SAS");
+            let sas = request.start_sas().await?
+                .ok_or_else(|| anyhow::anyhow!("Failed to start SAS verification"))?;
+            // We started SAS so we're the initiator — don't call accept
+            let flow_id = flow_id.to_string();
+            Self::spawn_sas_watcher(sas.clone(), tx, flow_id);
+            return Ok(sas);
+        }
+
+        if let VerificationRequestState::Transitioned { verification } = current {
+            if let Some(sas) = verification.sas() {
+                info!("Request already transitioned to SAS after accept");
+                // Other side started SAS — we need to accept
+                sas.accept().await?;
+                let flow_id = flow_id.to_string();
+                Self::spawn_sas_watcher(sas.clone(), tx, flow_id);
+                return Ok(sas);
+            }
+        }
+
+        // Not ready yet — subscribe before waiting so we don't miss transitions
         let mut changes = request.changes();
         while let Some(state) = changes.next().await {
+            info!("Verification request state change: {:?}", &state);
             match state {
-                VerificationRequestState::Ready { .. } => break,
+                VerificationRequestState::Ready { .. } => {
+                    let sas = request.start_sas().await?
+                        .ok_or_else(|| anyhow::anyhow!("Failed to start SAS verification"))?;
+                    // We started SAS — don't accept
+                    let flow_id = flow_id.to_string();
+                    Self::spawn_sas_watcher(sas.clone(), tx, flow_id);
+                    return Ok(sas);
+                }
+                VerificationRequestState::Transitioned { verification } => {
+                    if let Some(sas) = verification.sas() {
+                        // Other side started SAS — accept
+                        sas.accept().await?;
+                        let flow_id = flow_id.to_string();
+                        Self::spawn_sas_watcher(sas.clone(), tx, flow_id);
+                        return Ok(sas);
+                    }
+                }
                 VerificationRequestState::Done
                 | VerificationRequestState::Cancelled(_) => {
                     return Err(anyhow::anyhow!("Request cancelled before SAS could start"));
@@ -1014,15 +1252,7 @@ impl Account {
             }
         }
 
-        let sas = request.start_sas().await?
-            .ok_or_else(|| anyhow::anyhow!("Failed to start SAS verification"))?;
-
-        sas.accept().await?;
-        let flow_id = flow_id.to_string();
-
-        // Spawn SAS state watcher
-        Self::spawn_sas_watcher(sas.clone(), tx, flow_id);
-        Ok(sas)
+        Err(anyhow::anyhow!("Verification request stream ended unexpectedly"))
     }
 
     /// Spawn a background task watching VerificationRequest state changes
@@ -1140,9 +1370,15 @@ impl Account {
         tx: mpsc::UnboundedSender<MatrixEvent>,
         flow_id: String,
     ) {
+        // Subscribe to changes BEFORE spawning so we don't miss any transitions
+        let mut changes = sas.changes();
+
         tokio::spawn(async move {
-            // Check if emojis are already available
+            use matrix_sdk::encryption::verification::SasState;
+
+            // Check if emojis are already available (keys may have exchanged before we got here)
             if sas.can_be_presented() {
+                info!("SAS emojis already available at watcher start");
                 if let Some(emojis) = sas.emoji() {
                     let emoji_pairs: Vec<(String, String)> = emojis.iter()
                         .map(|e| (e.symbol.to_string(), e.description.to_string()))
@@ -1154,9 +1390,8 @@ impl Account {
                 }
             }
 
-            let mut changes = sas.changes();
             while let Some(state) = changes.next().await {
-                use matrix_sdk::encryption::verification::SasState;
+                info!("SAS state change: {:?}", &state);
                 match state {
                     SasState::KeysExchanged { emojis, .. } => {
                         if let Some(emoji_sas) = emojis {
@@ -1167,6 +1402,18 @@ impl Account {
                                 flow_id: flow_id.clone(),
                                 emojis: emoji_pairs,
                             });
+                        } else {
+                            // Keys exchanged but no emojis — try polling
+                            info!("KeysExchanged without emojis, polling sas.emoji()");
+                            if let Some(emojis) = sas.emoji() {
+                                let emoji_pairs: Vec<(String, String)> = emojis.iter()
+                                    .map(|e| (e.symbol.to_string(), e.description.to_string()))
+                                    .collect();
+                                let _ = tx.send(MatrixEvent::SasEmojis {
+                                    flow_id: flow_id.clone(),
+                                    emojis: emoji_pairs,
+                                });
+                            }
                         }
                     }
                     SasState::Done { .. } => {
@@ -1182,7 +1429,20 @@ impl Account {
                         });
                         break;
                     }
-                    _ => {}
+                    _ => {
+                        // Also check emojis on any other state change
+                        if sas.can_be_presented() {
+                            if let Some(emojis) = sas.emoji() {
+                                let emoji_pairs: Vec<(String, String)> = emojis.iter()
+                                    .map(|e| (e.symbol.to_string(), e.description.to_string()))
+                                    .collect();
+                                let _ = tx.send(MatrixEvent::SasEmojis {
+                                    flow_id: flow_id.clone(),
+                                    emojis: emoji_pairs,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         });

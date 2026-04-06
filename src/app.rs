@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::account::{Account, MatrixEvent, RoomDetails, RoomInfo};
+use crate::account::{Account, MatrixEvent, RoomDetails, RoomInfo, SpaceDetails};
 use crate::config::Config;
 use crate::event::{AppEvent, spawn_input_reader, spawn_matrix_bridge};
 use crate::ui;
@@ -82,6 +82,7 @@ pub enum Overlay {
     SasVerify,
     EmojiPicker,
     RoomInfo,
+    SpaceHome,
     FileConfirm,
 }
 
@@ -181,9 +182,11 @@ pub struct App {
     // Chat state
     pub messages: Vec<DisplayMessage>,
     pub scroll_offset: usize,
+    pub msg_scroll: usize, // line-level scroll within a tall selected message
     pub room_messages: HashMap<OwnedRoomId, Vec<DisplayMessage>>,
     pending_echoes: Vec<String>,
     pub downloading_keys: bool,
+    pub loading_older: bool,
     pub first_unread_index: Option<usize>,
     pub typing_users: Vec<String>,
     pub replying_to: Option<(String, String, String)>, // (event_id, sender, body_snippet)
@@ -288,6 +291,8 @@ pub struct App {
 
     // Viewport size (messages that fit on screen), updated during draw
     pub chat_viewport_msgs: Cell<usize>,
+    // How many lines the selected message overflows the viewport (0 if it fits)
+    pub selected_msg_overflow: Cell<usize>,
 
     // Help overlay scroll
     pub help_scroll: usize,
@@ -298,6 +303,18 @@ pub struct App {
 
     // Room info overlay state
     pub room_details: Option<RoomDetails>,
+
+    // Space home overlay state
+    pub space_details: Option<SpaceDetails>,
+
+    // User presence state: user_id -> "online" | "offline" | "unavailable"
+    pub user_presence: HashMap<String, String>,
+
+    // Collapsed spaces (room IDs of spaces that are collapsed in the room list)
+    pub collapsed_spaces: std::collections::HashSet<OwnedRoomId>,
+
+    // Termux detection
+    pub is_termux: bool,
 
     // Active theme
     pub theme: ui::Theme,
@@ -335,9 +352,11 @@ impl App {
             active_account_id: None,
             messages: Vec::new(),
             scroll_offset: 0,
+            msg_scroll: 0,
             room_messages: HashMap::new(),
             pending_echoes: Vec::new(),
             downloading_keys: false,
+            loading_older: false,
             first_unread_index: None,
             typing_users: Vec::new(),
             replying_to: None,
@@ -416,8 +435,13 @@ impl App {
             emoji_picker_selected: 0,
             emoji_picker_event_id: None,
             room_details: None,
+            space_details: None,
+            user_presence: HashMap::new(),
+            collapsed_spaces: std::collections::HashSet::new(),
+            is_termux: std::env::var("TERMUX_VERSION").is_ok(),
             room_history_tokens: HashMap::new(),
             chat_viewport_msgs: Cell::new(10),
+            selected_msg_overflow: Cell::new(0),
             theme,
             status_msg: "No accounts — press 'a' to add one".to_string(),
             selected_account: 0,
@@ -517,19 +541,7 @@ impl App {
                 }
                 return;
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
-                if self.overlay == Overlay::None {
-                    if let Some(ref room_id) = self.active_room {
-                        if let Some(ref aid) = self.active_account_id {
-                            if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
-                                self.room_details = account.get_room_details(room_id);
-                                self.overlay = Overlay::RoomInfo;
-                            }
-                        }
-                    }
-                }
-                return;
-            }
+            // Note: Ctrl+I is identical to Tab in terminals, so room info uses 'i' in chat panel instead
             _ => {}
         }
 
@@ -557,7 +569,7 @@ impl App {
             Overlay::Login => self.handle_login_key(key).await,
             Overlay::Help => {
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('?') => {
+                    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('h') => {
                         self.overlay = Overlay::None;
                         self.help_scroll = 0;
                     }
@@ -579,7 +591,7 @@ impl App {
             Overlay::MessageAction => self.handle_message_action_key(key).await,
             Overlay::SasVerify => self.handle_sas_verify_key(key).await,
             Overlay::EmojiPicker => self.handle_emoji_picker_key(key).await,
-            Overlay::RoomInfo => {
+            Overlay::RoomInfo | Overlay::SpaceHome => {
                 if key.code == KeyCode::Esc {
                     self.overlay = Overlay::None;
                 }
@@ -616,7 +628,7 @@ impl App {
             }
             KeyCode::Tab => self.focus = Focus::Rooms,
             KeyCode::Right => self.focus = Focus::Rooms,
-            KeyCode::Char('?') => self.overlay = Overlay::Help,
+            KeyCode::Char('?') | KeyCode::Char('h') => self.overlay = Overlay::Help,
             _ => {}
         }
     }
@@ -640,7 +652,30 @@ impl App {
                 }
             }
             (_, KeyCode::Enter) => {
-                self.open_selected_room().await;
+                if let Some(room) = self.all_rooms.get(self.selected_room) {
+                    if room.is_space {
+                        // Open space home overlay
+                        let room_id = room.id.clone();
+                        let account_id = room.account_id.clone();
+                        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+                            self.space_details = account.get_space_details(&room_id).await;
+                            self.overlay = Overlay::SpaceHome;
+                        }
+                    } else {
+                        self.open_selected_room().await;
+                    }
+                }
+            }
+            (_, KeyCode::Char(' ')) => {
+                // Space bar toggles collapse on a space
+                if let Some(room) = self.all_rooms.get(self.selected_room) {
+                    if room.is_space {
+                        let id = room.id.clone();
+                        if !self.collapsed_spaces.remove(&id) {
+                            self.collapsed_spaces.insert(id);
+                        }
+                    }
+                }
             }
             (_, KeyCode::Tab) => self.focus = Focus::Chat,
             (_, KeyCode::BackTab) => self.focus = Focus::Accounts,
@@ -657,7 +692,7 @@ impl App {
                 self.login_focus = 0;
                 self.login_error = None;
             }
-            (_, KeyCode::Char('?')) => self.overlay = Overlay::Help,
+            (_, KeyCode::Char('?')) | (_, KeyCode::Char('h')) => self.overlay = Overlay::Help,
             _ => {}
         }
     }
@@ -1630,7 +1665,10 @@ impl App {
         self.message_edit_busy = false;
     }
 
-    async fn fetch_older_messages(&mut self) {
+    fn fetch_older_messages(&mut self) {
+        if self.loading_older {
+            return;
+        }
         let (room_id, account_id) = match (&self.active_room, &self.active_account_id) {
             (Some(r), Some(a)) => (r.clone(), a.clone()),
             _ => return,
@@ -1640,37 +1678,53 @@ impl App {
             _ => return, // no more history or no token stored
         };
 
+        self.loading_older = true;
         self.status_msg = "Loading older messages...".to_string();
 
-        if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
-            match account
-                .fetch_history_paged(&room_id, Some(&token), 50)
-                .await
-            {
-                Ok((mut older_msgs, next_token)) => {
-                    if older_msgs.is_empty() {
-                        self.room_history_tokens.insert(room_id, None);
-                        self.status_msg = "No more messages".to_string();
-                        return;
+        let account = match self.accounts.iter().find(|a| a.user_id == account_id) {
+            Some(a) => a.client.clone(),
+            None => return,
+        };
+        let tx = self.matrix_tx.clone();
+        let rid = room_id.clone();
+
+        tokio::spawn(async move {
+            let room = match account.get_room(&rid) {
+                Some(r) => r,
+                None => {
+                    let _ = tx.send(MatrixEvent::OlderMessagesFailed {
+                        error: "Room not found".to_string(),
+                    });
+                    return;
+                }
+            };
+            let mut options = matrix_sdk::room::MessagesOptions::backward();
+            options.limit = matrix_sdk::ruma::UInt::from(50u32);
+            options = options.from(Some(token.as_str()));
+            match room.messages(options).await {
+                Ok(response) => {
+                    let mut messages = Vec::new();
+                    for timeline_event in &response.chunk {
+                        if let Ok(ev) = timeline_event.raw().deserialize() {
+                            if let Some(dm) = crate::account::Account::timeline_event_to_display_message(&ev) {
+                                messages.push(dm);
+                            }
+                        }
                     }
-                    let count = older_msgs.len();
-                    // Prepend older messages
-                    older_msgs.append(&mut self.messages);
-                    self.messages = older_msgs;
-                    // Adjust selected_message and scroll_offset for the prepended messages
-                    if let Some(sel) = self.selected_message {
-                        self.selected_message = Some(sel + count);
-                    }
-                    self.scroll_offset += count;
-                    // Store next token for further pagination
-                    self.room_history_tokens.insert(room_id, next_token);
-                    self.status_msg = format!("Loaded {} older messages", count);
+                    messages.reverse(); // backward pagination returns newest-first
+                    let _ = tx.send(MatrixEvent::OlderMessagesLoaded {
+                        room_id: rid,
+                        messages,
+                        next_token: response.end,
+                    });
                 }
                 Err(e) => {
-                    self.status_msg = format!("Failed to load history: {}", e);
+                    let _ = tx.send(MatrixEvent::OlderMessagesFailed {
+                        error: format!("{}", e),
+                    });
                 }
             }
-        }
+        });
     }
 
     async fn handle_chat_key(&mut self, key: KeyEvent) {
@@ -1684,40 +1738,45 @@ impl App {
                 match self.selected_message {
                     None => {
                         // Start selecting from the bottom
-                        self.selected_message = Some(self.messages.len() - 1);
+                        let last = self.messages.len() - 1;
+                        self.selected_message = Some(last);
                         self.scroll_offset = 0;
-                    }
-                    Some(0) => {
-                        // At top — try to load older messages
-                        self.fetch_older_messages().await;
+                        self.msg_scroll = 0;
                     }
                     Some(idx) => {
-                        let new_idx = idx - 1;
-                        self.selected_message = Some(new_idx);
-                        // Only scroll if selection would go above the visible area
-                        let end = self.messages.len().saturating_sub(self.scroll_offset);
-                        let start = end.saturating_sub(viewport);
-                        if new_idx < start {
-                            self.scroll_offset = self.scroll_offset.saturating_add(1);
+                        let overflow = self.selected_msg_overflow.get();
+                        if self.msg_scroll < overflow {
+                            // Scroll up within the tall message
+                            self.msg_scroll += 1;
+                        } else if idx == 0 {
+                            // At top — try to load older messages
+                            self.fetch_older_messages();
+                        } else {
+                            let new_idx = idx - 1;
+                            self.selected_message = Some(new_idx);
+                            self.scroll_offset = self.messages.len().saturating_sub(new_idx + 1);
+                            self.msg_scroll = 0;
                         }
                     }
                 }
             }
             KeyCode::Down => {
                 match self.selected_message {
-                    Some(idx) if idx + 1 < self.messages.len() => {
-                        let new_idx = idx + 1;
-                        self.selected_message = Some(new_idx);
-                        // Only scroll if selection would go below the visible area
-                        let end = self.messages.len().saturating_sub(self.scroll_offset);
-                        if new_idx >= end {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                    Some(idx) => {
+                        if self.msg_scroll > 0 {
+                            // Scroll down within the tall message
+                            self.msg_scroll -= 1;
+                        } else if idx + 1 < self.messages.len() {
+                            let new_idx = idx + 1;
+                            self.selected_message = Some(new_idx);
+                            self.scroll_offset = self.messages.len().saturating_sub(new_idx + 1);
+                            self.msg_scroll = 0;
+                        } else {
+                            // At bottom — deselect, return to live view
+                            self.selected_message = None;
+                            self.scroll_offset = 0;
+                            self.msg_scroll = 0;
                         }
-                    }
-                    Some(_) => {
-                        // At bottom — deselect, return to live view
-                        self.selected_message = None;
-                        self.scroll_offset = 0;
                     }
                     None => {}
                 }
@@ -1731,11 +1790,13 @@ impl App {
                 if !self.messages.is_empty() {
                     self.selected_message = Some(0);
                     self.scroll_offset = self.messages.len().saturating_sub(viewport);
+                    self.msg_scroll = 0;
                 }
             }
             KeyCode::End => {
                 self.selected_message = None;
                 self.scroll_offset = 0;
+                self.msg_scroll = 0;
             }
             KeyCode::Tab => self.focus = Focus::Input,
             KeyCode::BackTab => self.focus = Focus::Rooms,
@@ -1744,11 +1805,23 @@ impl App {
                 if self.selected_message.is_some() {
                     self.selected_message = None;
                     self.scroll_offset = 0;
+                    self.msg_scroll = 0;
                 } else {
                     self.focus = Focus::Rooms;
                 }
             }
-            KeyCode::Char('?') => self.overlay = Overlay::Help,
+            KeyCode::Char('?') | KeyCode::Char('h') => self.overlay = Overlay::Help,
+            KeyCode::Char('i') => {
+                // Room info overlay
+                if let Some(ref room_id) = self.active_room.clone() {
+                    if let Some(ref aid) = self.active_account_id.clone() {
+                        if let Some(account) = self.accounts.iter().find(|a| &a.user_id == aid) {
+                            self.room_details = account.get_room_details(room_id).await;
+                            self.overlay = Overlay::RoomInfo;
+                        }
+                    }
+                }
+            }
             KeyCode::Char('r') => {
                 // Reply to selected message (auto-select last if none selected)
                 let idx = self.selected_message.or_else(|| {
@@ -1758,8 +1831,8 @@ impl App {
                     if let Some(msg) = self.messages.get(idx) {
                         if let Some(ref eid) = msg.event_id {
                             let body = msg.body_text();
-                            let snippet = if body.len() > 50 {
-                                format!("{}...", &body[..50])
+                            let snippet = if body.chars().count() > 50 {
+                                format!("{}...", body.chars().take(50).collect::<String>())
                             } else {
                                 body.to_string()
                             };
@@ -2066,7 +2139,7 @@ impl App {
                     if self.settings_sort_selected + 1 < RoomSortMode::ALL.len() {
                         self.settings_sort_selected += 1;
                     }
-                } else if self.settings_selected < 3 {
+                } else if self.settings_selected < 4 {
                     self.settings_selected += 1;
                 }
             }
@@ -2177,6 +2250,9 @@ impl App {
                     // Clear Cache
                     self.do_clear_cache();
                     self.overlay = Overlay::None;
+                } else if self.settings_selected == 4 {
+                    // Reset All
+                    self.do_reset_all();
                 }
             }
             _ => {}
@@ -2253,6 +2329,49 @@ impl App {
         } else {
             self.status_msg = "No cache to clear".to_string();
         }
+    }
+
+    fn do_reset_all(&mut self) {
+        // Stop all syncs
+        for account in &mut self.accounts {
+            account.stop_sync();
+        }
+        self.accounts.clear();
+
+        // Wipe session data
+        let sessions_dir = crate::config::data_dir().join("sessions");
+        if sessions_dir.exists() {
+            let _ = std::fs::remove_dir_all(&sessions_dir);
+        }
+
+        // Wipe config
+        self.config.accounts.clear();
+        self.config.favorites.clear();
+        self.config.theme = String::new();
+        self.config.room_sort = "unread".to_string();
+        let _ = self.config.save();
+
+        // Reset all app state
+        self.all_rooms.clear();
+        self.messages.clear();
+        self.room_messages.clear();
+        self.room_history_tokens.clear();
+        self.active_room = None;
+        self.active_account_id = None;
+        self.selected_room = 0;
+        self.selected_account = 0;
+        self.scroll_offset = 0;
+        self.msg_scroll = 0;
+        self.selected_message = None;
+        self.typing_users.clear();
+        self.user_presence.clear();
+        self.collapsed_spaces.clear();
+        self.favorites_count = 0;
+        self.theme = crate::ui::theme_by_name("Default");
+        self.room_sort = RoomSortMode::Unread;
+        self.overlay = Overlay::None;
+        self.focus = Focus::Rooms;
+        self.status_msg = "Reset complete — press 'a' to add an account".to_string();
     }
 
     async fn do_login(&mut self) {
@@ -2333,6 +2452,7 @@ impl App {
                         .push(msg);
                     self.pending_echoes.push(body.to_string());
                     self.scroll_offset = 0;
+                    self.msg_scroll = 0;
                 }
                 Err(e) => {
                     self.status_msg = format!("Send failed: {}", e);
@@ -2374,6 +2494,7 @@ impl App {
                         .push(msg);
                     self.pending_echoes.push(body.to_string());
                     self.scroll_offset = 0;
+                    self.msg_scroll = 0;
                 }
                 Err(e) => {
                     self.status_msg = format!("Reply failed: {}", e);
@@ -2402,8 +2523,8 @@ impl App {
             });
         if let Some(orig) = found {
             let body = orig.body_text();
-            let snippet = if body.len() > 50 {
-                format!("{}...", &body[..50])
+            let snippet = if body.chars().count() > 50 {
+                format!("{}...", body.chars().take(50).collect::<String>())
             } else {
                 body.to_string()
             };
@@ -2421,8 +2542,8 @@ impl App {
             .filter_map(|m| {
                 let eid = m.event_id.as_ref()?;
                 let body = m.body_text();
-                let snippet = if body.len() > 50 {
-                    format!("{}...", &body[..50])
+                let snippet = if body.chars().count() > 50 {
+                    format!("{}...", body.chars().take(50).collect::<String>())
                 } else {
                     body.to_string()
                 };
@@ -2469,6 +2590,7 @@ impl App {
                     };
 
                 let receipt_eid = event_id.clone();
+                let body_ref = body.clone();
                 let msg = DisplayMessage {
                     event_id: Some(event_id),
                     sender: sender.to_string(),
@@ -2495,6 +2617,13 @@ impl App {
                             let _ = account.send_read_receipt(&room_id, &receipt_eid).await;
                         }
                     }
+                } else {
+                    // Termux notification for messages in non-active rooms
+                    let room_name = self.all_rooms.iter()
+                        .find(|r| r.id == room_id)
+                        .map(|r| r.name.as_str())
+                        .unwrap_or("?");
+                    self.termux_notify(sender.as_str(), &body_ref, room_name);
                 }
             }
             MatrixEvent::ImageMessage {
@@ -2682,6 +2811,32 @@ impl App {
                     }
                 }
             }
+            MatrixEvent::OlderMessagesLoaded { room_id, messages, next_token } => {
+                self.loading_older = false;
+                // Only apply if still viewing the same room
+                if self.active_room.as_ref() == Some(&room_id) {
+                    if messages.is_empty() {
+                        self.room_history_tokens.insert(room_id, None);
+                        self.status_msg = "No more messages".to_string();
+                    } else {
+                        let count = messages.len();
+                        let mut combined = messages;
+                        combined.append(&mut self.messages);
+                        self.messages = combined;
+                        if let Some(sel) = self.selected_message {
+                            self.selected_message = Some(sel + count);
+                        }
+                        self.scroll_offset += count;
+                        self.room_history_tokens.insert(room_id, next_token);
+                        self.trigger_image_downloads();
+                        self.status_msg = format!("Loaded {} older messages", count);
+                    }
+                }
+            }
+            MatrixEvent::OlderMessagesFailed { error } => {
+                self.loading_older = false;
+                self.status_msg = format!("Failed to load history: {}", error);
+            }
             MatrixEvent::SyncError { account_id, error } => {
                 if let Some(acct) = self.accounts.iter_mut().find(|a| a.user_id == account_id) {
                     acct.syncing = false;
@@ -2736,7 +2891,22 @@ impl App {
                     self.sas_error = Some(reason);
                 }
             }
+            MatrixEvent::Presence { user_id, presence } => {
+                self.user_presence.insert(user_id, presence);
+            }
         }
+    }
+
+    /// Send a Termux notification for a message in a non-active room
+    fn termux_notify(&self, sender: &str, body: &str, room_name: &str) {
+        if !self.is_termux {
+            return;
+        }
+        let title = format!("{} in {}", sender, room_name);
+        let content = if body.chars().count() > 100 { format!("{}…", body.chars().take(99).collect::<String>()) } else { body.to_string() };
+        let _ = std::process::Command::new("termux-notification")
+            .args(["--title", &title, "--content", &content])
+            .spawn();
     }
 
     pub async fn refresh_rooms(&mut self) {
@@ -2822,12 +2992,27 @@ impl App {
                 }
             }
 
+            let is_encrypted = room.encrypted;
             let unread = room.unread;
             self.active_room = Some(room_id.clone());
             self.active_account_id = Some(account_id.clone());
+
+            // Warn if entering an encrypted room without a verified session
+            if is_encrypted {
+                if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
+                    if !account.is_session_verified().await {
+                        self.status_msg = format!(
+                            "\u{1F512} {} — session not verified! Press 's' \u{2192} Accounts \u{2192} Verify Session",
+                            room_name
+                        );
+                    }
+                }
+            }
             self.messages.clear();
             self.scroll_offset = 0;
+            self.msg_scroll = 0;
             self.selected_message = None;
+            self.loading_older = false;
             self.typing_users.clear();
             self.replying_to = None;
             self.focus = Focus::Chat;
@@ -2848,7 +3033,20 @@ impl App {
             // Try fetch_history first (with pagination token)
             if let Some(account) = self.accounts.iter().find(|a| a.user_id == account_id) {
                 match account.fetch_history_paged(&room_id, None, 50).await {
-                    Ok((msgs, end_token)) if !msgs.is_empty() => {
+                    Ok((mut msgs, end_token)) if !msgs.is_empty() => {
+                        // Merge sync-cached messages that are newer than fetched history
+                        if let Some(cached) = self.room_messages.get(&room_id) {
+                            let last_fetched_ts = msgs.last().map(|m| m.timestamp).unwrap_or(0);
+                            let fetched_event_ids: std::collections::HashSet<_> = msgs.iter()
+                                .filter_map(|m| m.event_id.as_deref())
+                                .collect();
+                            let newer: Vec<_> = cached.iter()
+                                .filter(|cm| cm.timestamp >= last_fetched_ts
+                                    && cm.event_id.as_deref().map_or(true, |eid| !fetched_event_ids.contains(eid)))
+                                .cloned()
+                                .collect();
+                            msgs.extend(newer);
+                        }
                         let count = msgs.len();
                         self.room_history_tokens.insert(room_id.clone(), end_token);
                         let has_encrypted = msgs.iter().any(|m| m.body_text().contains("[encrypted message"));
@@ -2890,7 +3088,18 @@ impl App {
                             );
                         } else if account_synced {
                             self.status_msg =
-                                format!("{} ({}) — no messages", room_name, account_id);
+                                format!("{} ({}) — waiting for history token...", room_name, account_id);
+                            // Retry after sync delivers a prev_batch token
+                            let tx = self.matrix_tx.clone();
+                            let rid = room_id.clone();
+                            let aid = account_id.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                let _ = tx.send(MatrixEvent::KeysDownloaded {
+                                    room_id: rid,
+                                    account_id: aid,
+                                });
+                            });
                         }
                         // If not synced, status already says "waiting for sync"
                     }
@@ -3085,6 +3294,61 @@ impl App {
     // --- Paste / drag-and-drop ---
 
     async fn handle_paste(&mut self, data: String) {
+        // Route paste to the active overlay field if applicable
+        match self.overlay {
+            Overlay::Login => {
+                match self.login_focus {
+                    0 => self.login_homeserver.push_str(&data),
+                    1 => self.login_username.push_str(&data),
+                    2 => self.login_password.push_str(&data),
+                    _ => {}
+                }
+                return;
+            }
+            Overlay::Recovery => {
+                self.recovery_key.push_str(&data);
+                return;
+            }
+            Overlay::RoomSwitcher => {
+                self.switcher_query.push_str(&data);
+                return;
+            }
+            Overlay::ProfileEditor => {
+                match self.profile_focus {
+                    0 => self.profile_display_name.push_str(&data),
+                    1 => self.profile_avatar_url.push_str(&data),
+                    2 => self.profile_avatar_path.push_str(&data),
+                    _ => {}
+                }
+                return;
+            }
+            Overlay::RoomCreator => {
+                match self.creator_focus {
+                    1 => self.creator_name.push_str(&data),
+                    2 => self.creator_topic.push_str(&data),
+                    6 => self.creator_invite.push_str(&data),
+                    _ => {}
+                }
+                return;
+            }
+            Overlay::RoomEditor => {
+                match self.editor_focus {
+                    0 => self.editor_name.push_str(&data),
+                    1 => self.editor_topic.push_str(&data),
+                    2 => self.editor_invite_user.push_str(&data),
+                    _ => {}
+                }
+                return;
+            }
+            Overlay::MessageAction if self.message_editing => {
+                self.message_edit_text.insert_str(self.message_edit_cursor, &data);
+                self.message_edit_cursor += data.len();
+                return;
+            }
+            _ => {}
+        }
+
+        // Default: main input or file drop
         let path = data.trim().trim_matches('\'').trim_matches('"');
         let p = std::path::Path::new(path);
         if p.exists() && p.is_file() {

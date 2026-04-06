@@ -7,7 +7,7 @@ Multi-account terminal Matrix client. Simultaneous connections to multiple serve
 Install [Rust](https://rustup.rs), then:
 
 ```
-cargo install --git https://github.com/starlessoblivion/matrixtui.git
+cargo install --git https://github.com/marshallumsted/matrixtui.git
 ```
 
 Run with `mtui`. To update, run the same command again.
@@ -23,10 +23,14 @@ Run with `mtui`. To update, run the same command again.
 | `f` | Toggle favorite |
 | `Shift+Up/Down` | Reorder favorites |
 | `Tab` / arrow keys | Navigate panels |
-| `Enter` | Select room / send message |
+| `Enter` | Select room / send message / space home |
+| `Space` | Collapse / expand space |
+| `i` | Room info (members, topic, encryption) |
+| `r` | Reply to selected message |
+| `e` | React to selected message |
 | `Ctrl+K` | Quick room switcher |
-| `?` | Help |
 | `Ctrl+U` | Upload / attach file |
+| `? / h` | Help |
 | `Ctrl+Q` | Quit |
 
 ## Config
@@ -53,7 +57,7 @@ On successful login the server returns a **session access token**. This token is
 
 ### End-to-end encryption (E2EE)
 
-All encrypted rooms use the Matrix E2EE protocol (Olm/Megolm) via [matrix-rust-sdk](https://github.com/nickel-org/matrix-rust-sdk). Encryption keys, cross-signing keys, and sync state are stored in **unencrypted SQLite databases** under `~/.local/share/matrixtui/sessions/<account>/`. These files contain the cryptographic material needed to decrypt your message history. **Protect this directory** — if an attacker copies these files they can decrypt messages from your sessions.
+All encrypted rooms use the Matrix E2EE protocol (Olm/Megolm) via [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk). Encryption keys, cross-signing keys, and sync state are stored in **unencrypted SQLite databases** under `~/.local/share/matrixtui/sessions/<account>/`. These files contain the cryptographic material needed to decrypt your message history. **Protect this directory** — if an attacker copies these files they can decrypt messages from your sessions.
 
 Messages are decrypted in memory for display and are **never cached to disk** by MatrixTUI. When you close the client, decrypted message content only persists on the server (encrypted) and in the SQLite key store (keys only, not message content).
 
@@ -89,7 +93,7 @@ Recommended: set restrictive permissions on both directories (`chmod 700`). If y
 | Session verification (recovery key) | Supported |
 | Session verification (SAS emoji) | Supported |
 | Room key backup download | Supported (automatic on decrypt failure) |
-| Message history (backward pagination) | Supported (50 per page, scroll to load more) |
+| Message history (backward pagination) | Supported (scroll to load more) |
 | Read receipts | Supported (sent on room open / new messages) |
 | Typing indicators | Supported (send and receive) |
 | Unread message count | Supported |
@@ -101,7 +105,7 @@ Recommended: set restrictive permissions on both directories (`chmod 700`). If y
 | Edit room name / topic | Supported |
 | Invite users | Supported |
 | Leave rooms | Supported |
-| Room info (topic, members, encryption) | Supported (`Ctrl+I`) |
+| Room info (topic, members, encryption) | Supported (`i` in chat) |
 | Favorites / room pinning | Supported (`f` key, manual reorder) |
 | Profile editing (display name, avatar) | Supported |
 | Fuzzy room search | Supported (`Ctrl+K`) |
@@ -112,6 +116,16 @@ Recommended: set restrictive permissions on both directories (`chmod 700`). If y
 | Drag-and-drop file send | Supported (bracketed paste detection, confirm overlay) |
 | Media download | Supported (saves to ~/Downloads via action menu) |
 | Clickable media links | Supported (OSC 8 terminal hyperlinks, unencrypted rooms) |
+| User presence | Supported (online/away/offline dots in chat and room info) |
+| Push notifications (Termux) | Supported (auto-detect, `termux-notification` for background messages) |
+| Member list | Supported (browsable in room info overlay, `i` key) |
+| Spaces | Supported (hierarchy in room list, collapse/expand, space home) |
+| Paste in all fields | Supported (login, recovery, room switcher, profile, etc.) |
+| E2EE room lock indicator | Supported (🔒 prefix in room list) |
+| Unverified session warning | Supported (status bar prompt on encrypted room entry) |
+| Loading indicator | Supported (animated spinner while fetching messages) |
+| Smooth message scrolling | Supported (per-message scroll, partial top-message clipping) |
+| Reset All | Supported (wipe all data, logout, restore to fresh-install state) |
 
 ## To Be Implemented
 
@@ -120,12 +134,8 @@ Recommended: set restrictive permissions on both directories (`chmod 700`). If y
 | Threads | Matrix threading support |
 | Message search | Search within room or across rooms |
 | Room directory | Browse and join public rooms |
-| Spaces | Matrix spaces navigation |
-| User presence | Online/offline/away status |
-| Push notifications (Termux) | `termux-notification` integration |
 | Command mode | `/join`, `/leave`, `/invite`, `/topic`, etc. |
 | Per-account notification rules | Mute rooms, keyword alerts |
-| Member list | Browsable member list in room info |
 | User profiles | View other users' profiles |
 | Message formatting | Markdown rendering, code blocks |
 | URL previews | Inline link previews |
